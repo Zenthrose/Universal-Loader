@@ -12,7 +12,17 @@ else()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -pthread") # Add threading support
 endif()
 
-find_package(Vulkan REQUIRED)
+if(WIN32)
+    find_package(Vulkan REQUIRED)
+elseif(UNIX AND NOT APPLE)
+    find_library(vulkan REQUIRED)
+    find_library(MoltenVK REQUIRED)
+endif()
+
+if(UNIX AND APPLE)
+    find_library(Vulkan REQUIRED)
+    find_library(MoltenVK REQUIRED)
+endif()
 
 include_directories(${Vulkan_INCLUDE_DIRS})
 include_directories(${CMAKE_SOURCE_DIR}/src)
