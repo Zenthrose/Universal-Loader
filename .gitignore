@@ -1,0 +1,45 @@
+# Build directories
+build/
+cmake-build-*/
+
+# Compiled files
+*.o
+*.obj
+*.a
+*.lib
+*.dll
+*.so
+*.dylib
+*.exe
+*.out
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+install_manifest.txt
+compile_commands.json
+CTestTestfile.cmake
+_deps
+
+# IDE
+.vs/
+.vscode/
+*.vcxproj
+*.vcxproj.filters
+*.sln
+*.user
+*.suo
+*.sln.docstates
+
+# Shader compilation output
+*.spv
+
+# OS
+.DS_Store
+Thumbs.db
+*.swp
+*~
+
+# Logs
+*.log

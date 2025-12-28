@@ -1,0 +1,31 @@
+#pragma once
+#include <vulkan/vulkan.h>
+#include <cstdint>
+
+namespace vulkan {
+
+struct VulkanBuffer {
+    VkBuffer buffer;
+    VkDeviceMemory memory;
+    VkDeviceSize size;
+    void* mapped_ptr;
+};
+
+class VulkanMemory {
+public:
+    explicit VulkanMemory(VkDevice device);
+    ~VulkanMemory();
+
+    VulkanBuffer create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, 
+                               VkMemoryPropertyFlags properties);
+    void destroy_buffer(VulkanBuffer& buffer);
+    void copy_buffer(VkCommandBuffer cmd, VulkanBuffer src, VulkanBuffer dst, VkDeviceSize size);
+
+    VkDevice get_device() const { return device_; }
+
+private:
+    uint32_t find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties);
+    VkDevice device_;
+};
+
+}
