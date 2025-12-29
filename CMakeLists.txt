@@ -202,7 +202,7 @@ add_library(gguf_api STATIC ${GGUF_LOADER_SOURCES} ${INFERENCE_SOURCES} ${CORE_S
 target_link_libraries(gguf_api ${Vulkan_LIBRARIES})
 
 find_package(pybind11 CONFIG REQUIRED)
-pybind11_add_module(vulkangguf PRIVATE ${API_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES} ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})
+pybind11_add_module(vulkangguf ${API_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES} ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})
 target_link_libraries(vulkangguf PRIVATE ${Vulkan_LIBRARIES})
 
 add_executable(test_core tests/test_core.cpp ${CORE_SOURCES})

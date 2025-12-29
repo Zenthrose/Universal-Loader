@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <cstdint>
 #include <memory>
+#include <mutex>
 
 namespace inference {
 
@@ -47,7 +48,7 @@ private:
     std::unordered_map<std::string, bool> enabled_adapters_;
     std::unordered_map<std::string, float> adapter_alphas_;
 
-    std::mutex adapter_mutex_;
+    mutable std::mutex adapter_mutex_;
 };
 
 class WeightMergingStrategy {

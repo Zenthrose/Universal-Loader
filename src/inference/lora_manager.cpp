@@ -1,6 +1,7 @@
 #include "lora_manager.h"
 #include <algorithm>
 #include <cstring>
+#include <fstream>
 
 namespace inference {
 

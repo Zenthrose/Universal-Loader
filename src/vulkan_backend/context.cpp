@@ -17,18 +17,17 @@ VulkanContext::VulkanContext(const VulkanConfig& config)
     query_device_properties();
 
     // Check for required Vulkan extensions
-    bool has_required_extensions = supports_buffer_device_address_ && supports_timeline_semaphore_ && supports_device_group_;
+    bool has_required_extensions = supports_buffer_device_address_ && supports_timeline_semaphore_ && supports_device_group_ && supports_cooperative_matrix_;
     if (!has_required_extensions) {
         std::cerr << "[VulkanContext] ERROR: Required Vulkan extensions not supported on this device:" << std::endl;
         if (!supports_buffer_device_address_) std::cerr << "  - VK_KHR_buffer_device_address" << std::endl;
         if (!supports_timeline_semaphore_) std::cerr << "  - VK_KHR_timeline_semaphore" << std::endl;
         if (!supports_device_group_) std::cerr << "  - VK_KHR_device_group" << std::endl;
+        if (!supports_cooperative_matrix_) std::cerr << "  - VK_KHR_cooperative_matrix" << std::endl;
         std::cerr << "Please ensure your GPU and drivers support Vulkan 1.3+ and the required extensions." << std::endl;
+        std::cerr << "Falling back to CPU-only mode if available." << std::endl;
         initialized_ = false;
         return;
-    }
-    if (!supports_cooperative_matrix_) {
-        std::cout << "[VulkanContext] WARNING: VK_KHR_cooperative_matrix not supported. Some optimizations may be unavailable." << std::endl;
     }
 
     if (!find_queue_families()) {

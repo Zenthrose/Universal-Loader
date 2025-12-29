@@ -97,6 +97,13 @@ bool InferenceEngine::initialize(const InferenceConfig& config) {
                 timeline_semaphores_.get()
             );
 
+            profiler_ = std::make_unique<vulkan::Profiler>(
+                vulkan_context_->get_device(),
+                vulkan_context_->get_physical_device()
+            );
+
+            compute_dispatcher_->set_profiler(profiler_.get());
+
             std::cout << "[InferenceEngine] Vulkan backend initialized successfully" << std::endl;
 
         } catch (const std::exception& e) {
@@ -471,7 +478,9 @@ void InferenceEngine::forward_layer_gpu(uint32_t layer_id, const float* input, f
 
     GPUBuffers& buffers = gpu_buffers_[layer_name];
 
+    if (profiler_) profiler_->start_gpu_timing(compute_dispatcher_->get_command_buffer(), "transfer_upload", layer_id);
     upload_to_gpu(input, buffers.tensor_size, buffers.input_buffer);
+    if (profiler_) profiler_->end_gpu_timing(compute_dispatcher_->get_command_buffer(), "transfer_upload", layer_id);
 
     uint32_t num_heads = model_->get_num_heads();
     uint32_t head_dim = hidden_dim / num_heads;
@@ -493,20 +502,22 @@ void InferenceEngine::forward_layer_gpu(uint32_t layer_id, const float* input, f
     if (vulkan_context_->get_subgroup_size() >= 32) {
         VkPipeline rms_pipeline = pipeline_cache_->get_compute_pipeline("rms_norm_subgroup.glsl", layout_info);
         if (rms_pipeline != VK_NULL_HANDLE) {
-            compute_dispatcher_->dispatch(rms_pipeline, layout, work);
+            compute_dispatcher_->dispatch(rms_pipeline, layout, work, "rms_norm", layer_id);
+            compute_dispatcher_->wait_for_completion();
         }
     }
 
     if (should_use_flash_attention(layer_id)) {
         VkPipeline flash_pipeline = pipeline_cache_->get_compute_pipeline("flash_attention.glsl", layout_info);
         if (flash_pipeline != VK_NULL_HANDLE) {
-            compute_dispatcher_->dispatch(flash_pipeline, layout, work);
+            compute_dispatcher_->dispatch(flash_pipeline, layout, work, "attention", layer_id);
+            compute_dispatcher_->wait_for_completion();
         }
     }
 
-    compute_dispatcher_->wait_for_completion();
-
+    if (profiler_) profiler_->start_gpu_timing(compute_dispatcher_->get_command_buffer(), "transfer_download", layer_id);
     download_from_gpu(buffers.tensor_size, buffers.output_buffer, output);
+    if (profiler_) profiler_->end_gpu_timing(compute_dispatcher_->get_command_buffer(), "transfer_download", layer_id);
 
     memcpy(output, input, hidden_dim * sizeof(float));
 }
@@ -623,9 +634,29 @@ bool InferenceEngine::load_pipeline_cache(const std::string& path) {
 }
 
 void InferenceEngine::enable_profiling(bool enable) {
+    if (profiler_) {
+        if (enable) {
+            profiler_->begin_profiling();
+            profiler_->enable_vulkan_timestamps();
+        } else {
+            profiler_->end_profiling();
+            profiler_->disable_vulkan_timestamps();
+        }
+    }
 }
 
 std::string InferenceEngine::get_performance_report() const {
+    if (profiler_) {
+        auto data = profiler_->get_profiling_data();
+        std::string report = "Performance Report:\n";
+        report += "Total tokens: " + std::to_string(data.total_tokens) + "\n";
+        report += "Tokens/sec: " + std::to_string(data.tokens_per_second) + "\n";
+        report += "Peak memory: " + std::to_string(data.peak_memory_bytes / 1024 / 1024) + " MB\n";
+        for (const auto& metric : data.metrics) {
+            report += "Layer " + std::to_string(metric.layer_id) + " " + metric.operation + ": " + std::to_string(metric.duration_ms) + " ms\n";
+        }
+        return report;
+    }
     return "Profiling not enabled";
 }
 
