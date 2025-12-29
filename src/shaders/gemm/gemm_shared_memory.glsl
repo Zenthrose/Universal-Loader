@@ -1,12 +1,17 @@
 #version 460
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
+#extension GL_KHR_shader_subgroup_shuffle : require
 
-layout(local_size_x = 8, local_size_y = 8) in;
+layout(constant_id = 0) const uint TILE_M = 128;
+layout(constant_id = 1) const uint TILE_N = 64;
+layout(constant_id = 2) const uint TILE_K = 16;
+
+layout(local_size_x = 16, local_size_y = 8) in;
 
 layout(binding = 0) readonly buffer A { float a[]; };
 layout(binding = 1) readonly buffer B { float b[]; };
-layout(binding = 2) writeonly buffer C { float c[]; };
+layout(binding = 2) buffer C { float c[]; };
 
 layout(push_constant) uniform Params {
     uint M;
@@ -15,92 +20,63 @@ layout(push_constant) uniform Params {
     uint K_tiles;
     float alpha;
     float beta;
-    uint padding[2];
+    uint lda;
+    uint ldb;
+    uint ldc;
 } params;
 
-const uint TILE_M = 64;
-const uint TILE_N = 64;
-const uint TILE_K = 16;
-
-shared float s_a[TILE_M][TILE_K + 1];
-shared float s_b[TILE_K][TILE_N + 1];
+shared float s_a[TILE_M][TILE_K];
+shared float s_b[TILE_K][TILE_N];
 
 void main() {
     const uint bx = gl_WorkGroupID.x;
     const uint by = gl_WorkGroupID.y;
     const uint tx = gl_LocalInvocationID.x;
     const uint ty = gl_LocalInvocationID.y;
+    const uint tid = ty * 16 + tx;
 
-    const uint row = by * TILE_M + ty * 8;
-    const uint col = bx * TILE_N + tx * 8;
+    const uint warp_row = ty * 4;
+    const uint warp_col = tx * 4;
 
-    vec4 c0 = vec4(0.0);
-    vec4 c1 = vec4(0.0);
-    vec4 c2 = vec4(0.0);
-    vec4 c3 = vec4(0.0);
-    vec4 c4 = vec4(0.0);
-    vec4 c5 = vec4(0.0);
-    vec4 c6 = vec4(0.0);
-    vec4 c7 = vec4(0.0);
+    const uint row = by * TILE_M + warp_row;
+    const uint col = bx * TILE_N + warp_col;
+
+    vec4 acc[16];
+    for (uint i = 0; i < 16; ++i) {
+        acc[i] = vec4(0.0);
+    }
+
+    const uint num_loads_per_thread_a = (TILE_M * TILE_K) / 128;
+    const uint num_loads_per_thread_b = (TILE_K * TILE_N) / 128;
 
     for (uint k_tile = 0; k_tile < params.K_tiles; ++k_tile) {
         const uint k_base = k_tile * TILE_K;
 
-        const uint a_row = row;
-        const uint a_col = k_base + tx * 2;
-        const uint b_row = k_base + ty * 2;
-        const uint b_col = col;
+        for (uint i = 0; i < num_loads_per_thread_a; ++i) {
+            const uint load_idx = tid * num_loads_per_thread_a + i;
+            const uint a_row_shared = load_idx / TILE_K;
+            const uint a_col_shared = load_idx % TILE_K;
+            const uint a_row_global = by * TILE_M + a_row_shared;
+            const uint a_col_global = k_base + a_col_shared;
 
-        if (a_row < params.M && a_col < params.K) {
-            uint offset = a_row * params.K + a_col;
-            s_a[ty * 8][tx * 2] = a[offset];
-            if (a_col + 1 < params.K) {
-                s_a[ty * 8][tx * 2 + 1] = a[offset + 1];
-            }
-        } else {
-            s_a[ty * 8][tx * 2] = 0.0;
-            s_a[ty * 8][tx * 2 + 1] = 0.0;
-        }
-
-        if (ty * 8 < TILE_K) {
-            if (b_row < params.K && b_col < params.N) {
-                uint offset = b_row * params.N + b_col;
-                s_b[ty * 8][tx * 8] = b[offset];
-                if (b_col + 1 < params.N) {
-                    s_b[ty * 8][tx * 8 + 1] = b[offset + 1];
-                }
-                if (b_col + 2 < params.N) {
-                    s_b[ty * 8][tx * 8 + 2] = b[offset + 2];
-                }
-                if (b_col + 3 < params.N) {
-                    s_b[ty * 8][tx * 8 + 3] = b[offset + 3];
-                }
+            if (a_row_global < params.M && a_col_global < params.K) {
+                s_a[a_row_shared][a_col_shared] = a[a_row_global * params.lda + a_col_global];
             } else {
-                s_b[ty * 8][tx * 8] = 0.0;
-                s_b[ty * 8][tx * 8 + 1] = 0.0;
-                s_b[ty * 8][tx * 8 + 2] = 0.0;
-                s_b[ty * 8][tx * 8 + 3] = 0.0;
+                s_a[a_row_shared][a_col_shared] = 0.0;
             }
         }
 
-        if (ty * 8 + 1 < TILE_K) {
-            if (b_row + 1 < params.K && b_col < params.N) {
-                uint offset = (b_row + 1) * params.N + b_col;
-                s_b[ty * 8 + 1][tx * 8] = b[offset];
-                if (b_col + 1 < params.N) {
-                    s_b[ty * 8 + 1][tx * 8 + 1] = b[offset + 1];
-                }
-                if (b_col + 2 < params.N) {
-                    s_b[ty * 8 + 1][tx * 8 + 2] = b[offset + 2];
-                }
-                if (b_col + 3 < params.N) {
-                    s_b[ty * 8 + 1][tx * 8 + 3] = b[offset + 3];
-                }
+        for (uint i = 0; i < num_loads_per_thread_b; ++i) {
+            const uint load_idx = tid * num_loads_per_thread_b + i;
+            const uint b_row_shared = load_idx / TILE_N;
+            const uint b_col_shared = load_idx % TILE_N;
+            const uint b_row_global = k_base + b_row_shared;
+            const uint b_col_global = bx * TILE_N + b_col_shared;
+
+            if (b_row_global < params.K && b_col_global < params.N) {
+                s_b[b_row_shared][b_col_shared] = b[b_row_global * params.ldb + b_col_global];
             } else {
-                s_b[ty * 8 + 1][tx * 8] = 0.0;
-                s_b[ty * 8 + 1][tx * 8 + 1] = 0.0;
-                s_b[ty * 8 + 1][tx * 8 + 2] = 0.0;
-                s_b[ty * 8 + 1][tx * 8 + 3] = 0.0;
+                s_b[b_row_shared][b_col_shared] = 0.0;
             }
         }
 
@@ -108,133 +84,38 @@ void main() {
         barrier();
 
         for (uint k = 0; k < TILE_K; ++k) {
-            const float a0 = s_a[ty * 8][k];
-            const float a1 = s_a[ty * 8 + 1][k];
-            const float a2 = s_a[ty * 8 + 2][k];
-            const float a3 = s_a[ty * 8 + 3][k];
-            const float a4 = s_a[ty * 8 + 4][k];
-            const float a5 = s_a[ty * 8 + 5][k];
-            const float a6 = s_a[ty * 8 + 6][k];
-            const float a7 = s_a[ty * 8 + 7][k];
-
-            const vec4 b0 = vec4(s_b[k][tx * 8], s_b[k][tx * 8 + 1], s_b[k][tx * 8 + 2], s_b[k][tx * 8 + 3]);
-            const vec4 b1 = vec4(s_b[k][tx * 8 + 4], s_b[k][tx * 8 + 5], s_b[k][tx * 8 + 6], s_b[k][tx * 8 + 7]);
-
-            c0 += vec4(a0) * b0;
-            c1 += vec4(a1) * b0;
-            c2 += vec4(a2) * b0;
-            c3 += vec4(a3) * b0;
-            c4 += vec4(a4) * b1;
-            c5 += vec4(a5) * b1;
-            c6 += vec4(a6) * b1;
-            c7 += vec4(a7) * b1;
+            #pragma unroll
+            for (uint m = 0; m < 4; ++m) {
+                const float a_val = s_a[warp_row + m][k];
+                const vec4 b_vec = vec4(s_b[k][warp_col], s_b[k][warp_col + 1], s_b[k][warp_col + 2], s_b[k][warp_col + 3]);
+                acc[m * 4 + 0] += vec4(a_val) * b_vec;
+                acc[m * 4 + 1] += vec4(a_val) * b_vec;
+                acc[m * 4 + 2] += vec4(a_val) * b_vec;
+                acc[m * 4 + 3] += vec4(a_val) * b_vec;
+            }
         }
 
         memoryBarrierShared();
         barrier();
     }
 
-    if (row < params.M && col < params.N) {
-        c[row * params.N + col] = c0.x * params.alpha;
-    }
-    if (row < params.M && col + 1 < params.N) {
-        c[row * params.N + col + 1] = c0.y * params.alpha;
-    }
-    if (row < params.M && col + 2 < params.N) {
-        c[row * params.N + col + 2] = c0.z * params.alpha;
-    }
-    if (row < params.M && col + 3 < params.N) {
-        c[row * params.N + col + 3] = c0.w * params.alpha;
-    }
+    const float alpha = params.alpha;
+    const float beta = params.beta;
 
-    if (row + 1 < params.M && col < params.N) {
-        c[(row + 1) * params.N + col] = c1.x * params.alpha;
-    }
-    if (row + 1 < params.M && col + 1 < params.N) {
-        c[(row + 1) * params.N + col + 1] = c1.y * params.alpha;
-    }
-    if (row + 1 < params.M && col + 2 < params.N) {
-        c[(row + 1) * params.N + col + 2] = c1.z * params.alpha;
-    }
-    if (row + 1 < params.M && col + 3 < params.N) {
-        c[(row + 1) * params.N + col + 3] = c1.w * params.alpha;
-    }
+    for (uint m = 0; m < 4; ++m) {
+        const uint out_row = row + m;
+        if (out_row < params.M) {
+            const vec4 c_vals = (beta != 0.0) ?
+                vec4(c[out_row * params.ldc + col], c[out_row * params.ldc + col + 1],
+                     c[out_row * params.ldc + col + 2], c[out_row * params.ldc + col + 3]) * beta :
+                vec4(0.0);
 
-    if (row + 2 < params.M && col < params.N) {
-        c[(row + 2) * params.N + col] = c2.x * params.alpha;
-    }
-    if (row + 2 < params.M && col + 1 < params.N) {
-        c[(row + 2) * params.N + col + 1] = c2.y * params.alpha;
-    }
-    if (row + 2 < params.M && col + 2 < params.N) {
-        c[(row + 2) * params.N + col + 2] = c2.z * params.alpha;
-    }
-    if (row + 2 < params.M && col + 3 < params.N) {
-        c[(row + 2) * params.N + col + 3] = c2.w * params.alpha;
-    }
-
-    if (row + 3 < params.M && col < params.N) {
-        c[(row + 3) * params.N + col] = c3.x * params.alpha;
-    }
-    if (row + 3 < params.M && col + 1 < params.N) {
-        c[(row + 3) * params.N + col + 1] = c3.y * params.alpha;
-    }
-    if (row + 3 < params.M && col + 2 < params.N) {
-        c[(row + 3) * params.N + col + 2] = c3.z * params.alpha;
-    }
-    if (row + 3 < params.M && col + 3 < params.N) {
-        c[(row + 3) * params.N + col + 3] = c3.w * params.alpha;
-    }
-
-    if (row + 4 < params.M && col < params.N) {
-        c[(row + 4) * params.N + col] = c4.x * params.alpha;
-    }
-    if (row + 4 < params.M && col + 1 < params.N) {
-        c[(row + 4) * params.N + col + 1] = c4.y * params.alpha;
-    }
-    if (row + 4 < params.M && col + 2 < params.N) {
-        c[(row + 4) * params.N + col + 2] = c4.z * params.alpha;
-    }
-    if (row + 4 < params.M && col + 3 < params.N) {
-        c[(row + 4) * params.N + col + 3] = c4.w * params.alpha;
-    }
-
-    if (row + 5 < params.M && col < params.N) {
-        c[(row + 5) * params.N + col] = c5.x * params.alpha;
-    }
-    if (row + 5 < params.M && col + 1 < params.N) {
-        c[(row + 5) * params.N + col + 1] = c5.y * params.alpha;
-    }
-    if (row + 5 < params.M && col + 2 < params.N) {
-        c[(row + 5) * params.N + col + 2] = c5.z * params.alpha;
-    }
-    if (row + 5 < params.M && col + 3 < params.N) {
-        c[(row + 5) * params.N + col + 3] = c5.w * params.alpha;
-    }
-
-    if (row + 6 < params.M && col < params.N) {
-        c[(row + 6) * params.N + col] = c6.x * params.alpha;
-    }
-    if (row + 6 < params.M && col + 1 < params.N) {
-        c[(row + 6) * params.N + col + 1] = c6.y * params.alpha;
-    }
-    if (row + 6 < params.M && col + 2 < params.N) {
-        c[(row + 6) * params.N + col + 2] = c6.z * params.alpha;
-    }
-    if (row + 6 < params.M && col + 3 < params.N) {
-        c[(row + 6) * params.N + col + 3] = c6.w * params.alpha;
-    }
-
-    if (row + 7 < params.M && col < params.N) {
-        c[(row + 7) * params.N + col] = c7.x * params.alpha;
-    }
-    if (row + 7 < params.M && col + 1 < params.N) {
-        c[(row + 7) * params.N + col + 1] = c7.y * params.alpha;
-    }
-    if (row + 7 < params.M && col + 2 < params.N) {
-        c[(row + 7) * params.N + col + 2] = c7.z * params.alpha;
-    }
-    if (row + 7 < params.M && col + 3 < params.N) {
-        c[(row + 7) * params.N + col + 3] = c7.w * params.alpha;
+            for (uint n = 0; n < 4; ++n) {
+                const uint out_col = col + n;
+                if (out_col < params.N) {
+                    c[out_row * params.ldc + out_col] = c_vals[n] + alpha * acc[m * 4 + n][n];
+                }
+            }
+        }
     }
 }
