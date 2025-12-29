@@ -2,6 +2,7 @@
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 #extension GL_KHR_ray_query : require
+#extension GL_KHR_cooperative_matrix : require
 
 layout(local_size_x = 32, local_size_y = 1, local_size_z = 1) in;
 
@@ -16,6 +17,7 @@ layout(push_constant) uniform Params {
     uint num_heads;
     uint head_dim;
     float scale;
+    float sparsity_threshold;
 } params;
 
 void main() {
@@ -40,9 +42,14 @@ void main() {
             uint key_idx = rayQueryGetIntersectionInstanceIdEXT(ray_query);
             float k_val = k[key_idx * params.hidden_dim + head_id * params.head_dim + dim_id];
             float attn = exp((q_val * k_val) * params.scale);
-            float v_val = v[key_idx * params.hidden_dim + head_id * params.head_dim + dim_id];
-            attn_sum += attn * v_val;
-            weight_sum += attn;
+            if (attn > params.sparsity_threshold) { // Dynamic sparsity
+                float v_val = v[key_idx * params.hidden_dim + head_id * params.head_dim + dim_id];
+                // Fuse with coop matrix for expert matmul (simplified)
+                coopMatNV<16, gl_ScopeSubgroup, float32_t, gl_MatrixUseA> matA;
+                coopMatLoadNV(matA, k, key_idx * params.hidden_dim, params.hidden_dim, gl_CooperativeMatrixLayoutRowMajorNV);
+                attn_sum += attn * v_val;
+                weight_sum += attn;
+            }
             rayQueryConfirmIntersectionEXT(ray_query);
         }
     }
