@@ -1,7 +1,10 @@
 #version 460
 #extension GL_KHR_cooperative_matrix : require
+#extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int8 : require
+#extension GL_KHR_shader_subgroups : require
 
-layout(local_size_x = 16, local_size_y = 16) in;
+layout(local_size_x = 32, local_size_y = 1) in;
 
 layout(binding = 0) readonly buffer A { float a[]; };
 layout(binding = 1) readonly buffer B { float b[]; };
@@ -11,35 +14,46 @@ layout(push_constant) uniform Params {
     uint M;
     uint N;
     uint K;
-    uint padding;
+    uint K_tiles;
+    float alpha;
+    float beta;
+    uint mat_scope;
+    uint mat_layout;
 } params;
 
-cooperative_matrixKHR matA;
-cooperative_matrixKHR matB;
-cooperative_matrixKHR matC;
+layout(constant_id = 0) const uint TILE_M = 16;
+layout(constant_id = 1) const uint TILE_N = 16;
+layout(constant_id = 2) const uint TILE_K = 16;
+
+const uint ScopeSubgroup = 1;
+const uint ScopeWorkgroup = 2;
+const uint ScopeDevice = 3;
+
+const uint LayoutRowMajor = 0;
+const uint LayoutColMajor = 1;
+
+cooperative_matrixKHR<float, ScopeSubgroup, UseA, TILE_M, TILE_K> matA;
+cooperative_matrixKHR<float, ScopeSubgroup, UseB, TILE_K, TILE_N> matB;
+cooperative_matrixKHR<float, ScopeSubgroup, UseC, TILE_M, TILE_N> matC;
 
 void main() {
-    uint bx = gl_WorkGroupID.x;
-    uint by = gl_WorkGroupID.y;
-    uint tx = gl_LocalInvocationID.x;
-    uint ty = gl_LocalInvocationID.y;
+    const uint bx = gl_WorkGroupID.x;
+    const uint by = gl_WorkGroupID.y;
+    const uint tx = gl_LocalInvocationID.x;
 
-    uint row = by * 16 + ty;
-    uint col = bx * 16 + tx;
+    const uint row = by * TILE_M;
+    const uint col = bx * TILE_N;
 
-    uint M_tile = (params.M + 15) / 16;
-    uint N_tile = (params.N + 15) / 16;
-    uint K_tile = (params.K + 15) / 16;
+    cooperativeMatrixLoadKHR(matC, c, row * params.N + col, params.N, LayoutColMajor);
 
-    uint subM = (M_tile + 1) / 2;
-    uint subK = (K_tile + 1) / 2;
-    uint subN = (N_tile + 1) / 2;
+    for (uint k_tile = 0; k_tile < params.K_tiles; ++k_tile) {
+        const uint k_base = k_tile * TILE_K;
 
-    coopMatLoadA(matA, 0, row, subM, subK);
-    coopMatLoadB(matB, 0, col, subK, subN);
-    coopMatLoadC(matC, 0, row, subM, subN);
+        cooperativeMatrixLoadKHR(matA, a, row * params.K + k_base, params.K, LayoutRowMajor);
+        cooperativeMatrixLoadKHR(matB, b, k_base * params.N + col, params.N, LayoutRowMajor);
 
-    coopMatMulAdd(matA, matB, matC);
+        cooperativeMatrixMulAddKHR(matA, matB, matC, matC);
+    }
 
-    coopMatStoreC(matC, 0, row, col, subM, subN);
+    cooperativeMatrixStoreKHR(matC, c, row * params.N + col, params.N, LayoutColMajor);
 }

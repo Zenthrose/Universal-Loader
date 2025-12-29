@@ -1,12 +1,14 @@
 #version 460
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int16 : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
 
 layout(local_size_x = 8, local_size_y = 8) in;
 
-layout(binding = 0) readonly buffer A { float a[]; };
-layout(binding = 1) readonly buffer B { float b[]; };
-layout(binding = 2) writeonly buffer C { float c[]; };
+layout(binding = 0) readonly buffer A_Q4 { uint16_t a_q4[]; };
+layout(binding = 1) readonly buffer A_Scale { float a_scale[]; };
+layout(binding = 2) readonly buffer B { float b[]; };
+layout(binding = 3) writeonly buffer C { float c[]; };
 
 layout(push_constant) uniform Params {
     uint M;
@@ -15,7 +17,8 @@ layout(push_constant) uniform Params {
     uint K_tiles;
     float alpha;
     float beta;
-    uint padding[2];
+    uint block_size;
+    uint padding[3];
 } params;
 
 const uint TILE_M = 64;
@@ -24,6 +27,12 @@ const uint TILE_K = 16;
 
 shared float s_a[TILE_M][TILE_K + 1];
 shared float s_b[TILE_K][TILE_N + 1];
+
+float dequant_q4_0(uint16_t packed, float scale) {
+    float lo = float(packed & 0x0F);
+    float hi = float((packed >> 4) & 0x0F);
+    return (lo - 8.0) * scale;
+}
 
 void main() {
     const uint bx = gl_WorkGroupID.x;
@@ -52,10 +61,30 @@ void main() {
         const uint b_col = col;
 
         if (a_row < params.M && a_col < params.K) {
-            uint offset = a_row * params.K + a_col;
-            s_a[ty * 8][tx * 2] = a[offset];
+            uint idx = a_row * params.K + a_col;
+            uint block_a = idx / params.block_size;
+            uint idx_a = idx % params.block_size;
+            uint packed_idx = block_a * (params.block_size / 2) + idx_a / 2;
+            uint16_t packed = a_q4[packed_idx];
+            float scale = a_scale[block_a];
+
+            s_a[ty * 8][tx * 2] = (idx_a % 2 == 0) ? 
+                ((float(packed & 0x0F) - 8.0) * scale) : 
+                ((float((packed >> 4) & 0x0F) - 8.0) * scale);
+
             if (a_col + 1 < params.K) {
-                s_a[ty * 8][tx * 2 + 1] = a[offset + 1];
+                uint idx1 = a_row * params.K + a_col + 1;
+                uint block_a1 = idx1 / params.block_size;
+                uint idx_a1 = idx1 % params.block_size;
+                uint packed_idx1 = block_a1 * (params.block_size / 2) + idx_a1 / 2;
+                uint16_t packed1 = a_q4[packed_idx1];
+                float scale1 = a_scale[block_a1];
+
+                s_a[ty * 8][tx * 2 + 1] = (idx_a1 % 2 == 0) ? 
+                    ((float(packed1 & 0x0F) - 8.0) * scale1) : 
+                    ((float((packed1 >> 4) & 0x0F) - 8.0) * scale1);
+            } else {
+                s_a[ty * 8][tx * 2 + 1] = 0.0;
             }
         } else {
             s_a[ty * 8][tx * 2] = 0.0;

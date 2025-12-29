@@ -1,9 +1,9 @@
 #version 460
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
 #extension GL_KHR_shader_subgroup_arithmetic : require
-#extension GL_KHR_shader_subgroup_shuffle : require
+#extension GL_KHR_shader_subgroup_ballot : require
 
-layout(local_size_x = 128, local_size_y = 2) in;
+layout(local_size_x = 128, local_size_y = 4) in;
 
 layout(binding = 0) readonly buffer Q { float q[]; };
 layout(binding = 1) readonly buffer K_Cache { float k_cache[]; };
@@ -23,14 +23,13 @@ layout(push_constant) uniform Params {
     uint padding[3];
 } params;
 
-const uint BLOCK_M = 64;
+const uint BLOCK_M = 128;
 const uint BLOCK_N = 64;
 const uint BLOCK_D = 64;
 
 shared float s_q[BLOCK_M][BLOCK_D];
 shared float s_k[BLOCK_N][BLOCK_D];
 shared float s_v[BLOCK_N][BLOCK_D];
-shared float s_qk[BLOCK_M][BLOCK_N];
 
 void main() {
     const uint tx = gl_LocalInvocationID.x;
@@ -52,6 +51,13 @@ void main() {
     vec4 acc[16];
     for (int i = 0; i < 16; ++i) {
         acc[i] = vec4(0.0);
+    }
+
+    float row_max[BLOCK_M / 128];
+    float row_sum[BLOCK_M / 128];
+    for (int i = 0; i < BLOCK_M / 128; ++i) {
+        row_max[i] = -1e30;
+        row_sum[i] = 0.0;
     }
 
     const uint n_blocks = (params.max_seq_len + BLOCK_N - 1) / BLOCK_N;
@@ -133,79 +139,59 @@ void main() {
         memoryBarrierShared();
         barrier();
 
-        for (uint m_idx = 0; m_idx < BLOCK_M; ++m_idx) {
-            const uint seq_pos = seq_start + m_idx;
-            if (seq_pos >= params.seq_len) break;
+        const uint local_m = (tx % (BLOCK_M / 128)) * 128 + (tx / (BLOCK_M / 128));
+        const uint local_q_row = local_m;
 
-            for (uint n_idx = 0; n_idx < BLOCK_N; n_idx += 128) {
-                const uint kv_pos = kv_start + n_idx + tx;
-                if (kv_pos >= kv_end) break;
+        if (local_q_row < BLOCK_M && seq_start + local_q_row < params.seq_len) {
+            float new_max = row_max[local_q_row / 128];
+            float new_sum = row_sum[local_q_row / 128];
 
-                const bool is_causal = (params.is_causal != 0) && (kv_pos > seq_pos);
-                if (is_causal) {
-                    if (m_idx < BLOCK_M && n_idx + tx < BLOCK_N) {
-                        s_qk[m_idx][n_idx + tx] = -1e30;
-                    }
-                    continue;
-                }
+            for (uint n_idx = 0; n_idx < BLOCK_N; ++n_idx) {
+                const uint kv_pos = kv_start + n_idx;
+                if (kv_pos >= params.max_seq_len) break;
+
+                const bool is_causal = (params.is_causal != 0) && (kv_pos > (seq_start + local_q_row));
+                if (is_causal) continue;
 
                 float qk = 0.0;
                 for (uint d = 0; d < params.head_dim; ++d) {
-                    qk += s_q[m_idx][d] * s_k[n_idx + tx][d];
+                    qk += s_q[local_q_row][d] * s_k[n_idx][d];
                 }
                 qk *= params.scale;
 
-                if (m_idx < BLOCK_M && n_idx + tx < BLOCK_N) {
-                    s_qk[m_idx][n_idx + tx] = qk;
-                }
-            }
-        }
-
-        memoryBarrierShared();
-        barrier();
-
-        for (uint m_idx = 0; m_idx < BLOCK_M; ++m_idx) {
-            const uint seq_pos = seq_start + m_idx;
-            if (seq_pos >= params.seq_len) break;
-
-            float row_max = -1e30;
-            for (uint n_idx = 0; n_idx < BLOCK_N; n_idx += 128) {
-                float local_max = -1e30;
-                if (n_idx + tx < BLOCK_N) {
-                    local_max = s_qk[m_idx][n_idx + tx];
-                }
-                local_max = subgroupMax(local_max);
-                row_max = max(row_max, local_max);
+                const float old_max = new_max;
+                new_max = max(new_max, qk);
+                const float scale_val = exp(old_max - new_max);
+                new_sum = new_sum * scale_val + exp(qk - new_max);
             }
 
-            float row_sum = 0.0;
-            for (uint n_idx = 0; n_idx < BLOCK_N; n_idx += 128) {
-                float exp_val = 0.0;
-                if (n_idx + tx < BLOCK_N) {
-                    exp_val = exp(s_qk[m_idx][n_idx + tx] - row_max);
-                }
-                float local_sum = subgroupAdd(exp_val);
-                row_sum += subgroupShuffle(local_sum, 0);
+            const float scale_final = exp(row_max[local_q_row / 128] - new_max);
+            for (int i = 0; i < 16; ++i) {
+                acc[local_q_row / 8] *= scale_final;
             }
 
-            if (row_sum > 0.0) {
-                const uint acc_idx = m_idx / 4;
-                const uint d_base = (m_idx % 4) * 16;
+            row_max[local_q_row / 128] = new_max;
+            row_sum[local_q_row / 128] = new_sum;
 
-                for (uint n_idx = 0; n_idx < BLOCK_N; ++n_idx) {
-                    const uint kv_pos = kv_start + n_idx;
-                    if (kv_pos >= kv_end) break;
+            for (uint n_idx = 0; n_idx < BLOCK_N; ++n_idx) {
+                const uint kv_pos = kv_start + n_idx;
+                if (kv_pos >= params.max_seq_len) break;
 
-                    const bool is_causal = (params.is_causal != 0) && (kv_pos > seq_pos);
-                    if (is_causal) continue;
+                const bool is_causal = (params.is_causal != 0) && (kv_pos > (seq_start + local_q_row));
+                if (is_causal) continue;
 
-                    const float attn_weight = exp(s_qk[m_idx][n_idx] - row_max) / row_sum;
+                float qk = 0.0;
+                for (uint d = 0; d < params.head_dim; ++d) {
+                    qk += s_q[local_q_row][d] * s_k[n_idx][d];
+                }
+                qk *= params.scale;
 
-                    for (uint d = 0; d < 16 && d_base + d < params.head_dim; ++d) {
-                        if (acc_idx < 16) {
-                            acc[acc_idx][d] += attn_weight * s_v[n_idx][d_base + d];
-                        }
-                    }
+                const float attn_weight = exp(qk - new_max);
+
+                const uint acc_idx = local_q_row / 8;
+                const uint d_start = (local_q_row % 8) * 8;
+                for (uint d = 0; d < 8 && d_start + d < params.head_dim; ++d) {
+                    acc[acc_idx][d] += attn_weight * s_v[n_idx][d_start + d];
                 }
             }
         }
@@ -222,13 +208,18 @@ void main() {
         if (seq_pos >= params.seq_len) continue;
 
         const uint out_idx = out_idx_base + seq_pos * params.num_q_heads * params.head_dim;
-        const uint acc_base = m / 4;
-        const uint d_base = (m % 4) * 16;
 
-        for (uint d = 0; d < 16 && d_base + d < params.head_dim; ++d) {
-            const uint global_write_idx = out_idx + d_base + d;
-            if (global_write_idx < out.length()) {
-                out[global_write_idx] = acc[acc_base][d];
+        const uint acc_base = m / 8;
+        const uint d_base = (m % 8) * 8;
+
+        if (row_sum[m / 128] > 0.0) {
+            const float inv_sum = 1.0 / row_sum[m / 128];
+            for (uint d = 0; d < 8 && d_base + d < params.head_dim; ++d) {
+                const uint write_idx = (m % 8) * 32 + d;
+                const uint global_write_idx = out_idx + d_base + d;
+                if (global_write_idx < out.length()) {
+                    out[global_write_idx] = acc[acc_base][d] * inv_sum;
+                }
             }
         }
     }

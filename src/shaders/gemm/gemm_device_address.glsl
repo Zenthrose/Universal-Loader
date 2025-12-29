@@ -1,47 +1,246 @@
 #version 460
-#extension GL_KHR_buffer_device_address : require
 #extension GL_EXT_shader_explicit_arithmetic_types_float16 : require
+#extension GL_EXT_shader_explicit_arithmetic_types_int64 : require
+#extension GL_EXT_buffer_reference : require
+#extension GL_EXT_buffer_reference2 : require
+#extension GL_KHR_shader_subgroup_arithmetic : require
 
-layout(local_size_x = 256, local_size_y = 1) in;
+layout(local_size_x = 8, local_size_y = 8) in;
 
-layout(buffer_reference, std430) readonly buffer Tensor {
-    float data[];
+layout(buffer_reference, std430) readonly buffer FloatBuffer {
+    float values[];
 };
 
 layout(push_constant) uniform Params {
+    FloatBuffer a_ptr;
+    FloatBuffer b_ptr;
+    FloatBuffer c_ptr;
     uint M;
     uint N;
     uint K;
-    uint padding;
+    uint K_tiles;
+    float alpha;
+    float beta;
+    uint padding[2];
 } params;
 
-layout(buffer_reference, std430) readonly buffer MatmulParams {
-    float a_ptr;
-    float b_ptr;
-    float c_ptr;
-};
+const uint TILE_M = 64;
+const uint TILE_N = 64;
+const uint TILE_K = 16;
 
-shared float s_tile[256];
+shared float s_a[TILE_M][TILE_K + 1];
+shared float s_b[TILE_K][TILE_N + 1];
 
 void main() {
-    uint global_id = gl_GlobalInvocationID.x;
-    
-    if (global_id >= params.M * params.N) return;
-    
-    uint row = global_id / params.N;
-    uint col = global_id % params.N;
-    
-    float a_ptr = MatmulParams.a_ptr + row * params.K * 4;
-    float b_ptr = MatmulParams.b_ptr + col * params.K * 4;
-    
-    float sum = 0.0;
-    
-    for (uint k = 0; k < params.K; ++k) {
-        float a_val = *reinterpret_cast<float*>(a_ptr + k * 4);
-        float b_val = *reinterpret_cast<float*>(b_ptr + k * 4);
-        sum += a_val * b_val;
+    const uint bx = gl_WorkGroupID.x;
+    const uint by = gl_WorkGroupID.y;
+    const uint tx = gl_LocalInvocationID.x;
+    const uint ty = gl_LocalInvocationID.y;
+
+    const uint row = by * TILE_M + ty * 8;
+    const uint col = bx * TILE_N + tx * 8;
+
+    vec4 c0 = vec4(0.0);
+    vec4 c1 = vec4(0.0);
+    vec4 c2 = vec4(0.0);
+    vec4 c3 = vec4(0.0);
+    vec4 c4 = vec4(0.0);
+    vec4 c5 = vec4(0.0);
+    vec4 c6 = vec4(0.0);
+    vec4 c7 = vec4(0.0);
+
+    for (uint k_tile = 0; k_tile < params.K_tiles; ++k_tile) {
+        const uint k_base = k_tile * TILE_K;
+
+        const uint a_row = row;
+        const uint a_col = k_base + tx * 2;
+        const uint b_row = k_base + ty * 2;
+        const uint b_col = col;
+
+        if (a_row < params.M && a_col < params.K) {
+            uint offset = a_row * params.K + a_col;
+            s_a[ty * 8][tx * 2] = params.a_ptr.values[offset];
+            if (a_col + 1 < params.K) {
+                s_a[ty * 8][tx * 2 + 1] = params.a_ptr.values[offset + 1];
+            }
+        } else {
+            s_a[ty * 8][tx * 2] = 0.0;
+            s_a[ty * 8][tx * 2 + 1] = 0.0;
+        }
+
+        if (ty * 8 < TILE_K) {
+            if (b_row < params.K && b_col < params.N) {
+                uint offset = b_row * params.N + b_col;
+                s_b[ty * 8][tx * 8] = params.b_ptr.values[offset];
+                if (b_col + 1 < params.N) {
+                    s_b[ty * 8][tx * 8 + 1] = params.b_ptr.values[offset + 1];
+                }
+                if (b_col + 2 < params.N) {
+                    s_b[ty * 8][tx * 8 + 2] = params.b_ptr.values[offset + 2];
+                }
+                if (b_col + 3 < params.N) {
+                    s_b[ty * 8][tx * 8 + 3] = params.b_ptr.values[offset + 3];
+                }
+            } else {
+                s_b[ty * 8][tx * 8] = 0.0;
+                s_b[ty * 8][tx * 8 + 1] = 0.0;
+                s_b[ty * 8][tx * 8 + 2] = 0.0;
+                s_b[ty * 8][tx * 8 + 3] = 0.0;
+            }
+        }
+
+        if (ty * 8 + 1 < TILE_K) {
+            if (b_row + 1 < params.K && b_col < params.N) {
+                uint offset = (b_row + 1) * params.N + b_col;
+                s_b[ty * 8 + 1][tx * 8] = params.b_ptr.values[offset];
+                if (b_col + 1 < params.N) {
+                    s_b[ty * 8 + 1][tx * 8 + 1] = params.b_ptr.values[offset + 1];
+                }
+                if (b_col + 2 < params.N) {
+                    s_b[ty * 8 + 1][tx * 8 + 2] = params.b_ptr.values[offset + 2];
+                }
+                if (b_col + 3 < params.N) {
+                    s_b[ty * 8 + 1][tx * 8 + 3] = params.b_ptr.values[offset + 3];
+                }
+            } else {
+                s_b[ty * 8 + 1][tx * 8] = 0.0;
+                s_b[ty * 8 + 1][tx * 8 + 1] = 0.0;
+                s_b[ty * 8 + 1][tx * 8 + 2] = 0.0;
+                s_b[ty * 8 + 1][tx * 8 + 3] = 0.0;
+            }
+        }
+
+        memoryBarrierShared();
+        barrier();
+
+        for (uint k = 0; k < TILE_K; ++k) {
+            const float a0 = s_a[ty * 8][k];
+            const float a1 = s_a[ty * 8 + 1][k];
+            const float a2 = s_a[ty * 8 + 2][k];
+            const float a3 = s_a[ty * 8 + 3][k];
+            const float a4 = s_a[ty * 8 + 4][k];
+            const float a5 = s_a[ty * 8 + 5][k];
+            const float a6 = s_a[ty * 8 + 6][k];
+            const float a7 = s_a[ty * 8 + 7][k];
+
+            const vec4 b0 = vec4(s_b[k][tx * 8], s_b[k][tx * 8 + 1], s_b[k][tx * 8 + 2], s_b[k][tx * 8 + 3]);
+            const vec4 b1 = vec4(s_b[k][tx * 8 + 4], s_b[k][tx * 8 + 5], s_b[k][tx * 8 + 6], s_b[k][tx * 8 + 7]);
+
+            c0 += vec4(a0) * b0;
+            c1 += vec4(a1) * b0;
+            c2 += vec4(a2) * b0;
+            c3 += vec4(a3) * b0;
+            c4 += vec4(a4) * b1;
+            c5 += vec4(a5) * b1;
+            c6 += vec4(a6) * b1;
+            c7 += vec4(a7) * b1;
+        }
+
+        memoryBarrierShared();
+        barrier();
     }
-    
-    float c_ptr = MatmulParams.c_ptr + global_id * 4;
-    *reinterpret_cast<float*>(c_ptr) = sum;
+
+    if (row < params.M && col < params.N) {
+        params.c_ptr.values[row * params.N + col] = c0.x * params.alpha;
+    }
+    if (row < params.M && col + 1 < params.N) {
+        params.c_ptr.values[row * params.N + col + 1] = c0.y * params.alpha;
+    }
+    if (row < params.M && col + 2 < params.N) {
+        params.c_ptr.values[row * params.N + col + 2] = c0.z * params.alpha;
+    }
+    if (row < params.M && col + 3 < params.N) {
+        params.c_ptr.values[row * params.N + col + 3] = c0.w * params.alpha;
+    }
+
+    if (row + 1 < params.M && col < params.N) {
+        params.c_ptr.values[(row + 1) * params.N + col] = c1.x * params.alpha;
+    }
+    if (row + 1 < params.M && col + 1 < params.N) {
+        params.c_ptr.values[(row + 1) * params.N + col + 1] = c1.y * params.alpha;
+    }
+    if (row + 1 < params.M && col + 2 < params.N) {
+        params.c_ptr.values[(row + 1) * params.N + col + 2] = c1.z * params.alpha;
+    }
+    if (row + 1 < params.M && col + 3 < params.N) {
+        params.c_ptr.values[(row + 1) * params.N + col + 3] = c1.w * params.alpha;
+    }
+
+    if (row + 2 < params.M && col < params.N) {
+        params.c_ptr.values[(row + 2) * params.N + col] = c2.x * params.alpha;
+    }
+    if (row + 2 < params.M && col + 1 < params.N) {
+        params.c_ptr.values[(row + 2) * params.N + col + 1] = c2.y * params.alpha;
+    }
+    if (row + 2 < params.M && col + 2 < params.N) {
+        params.c_ptr.values[(row + 2) * params.N + col + 2] = c2.z * params.alpha;
+    }
+    if (row + 2 < params.M && col + 3 < params.N) {
+        params.c_ptr.values[(row + 2) * params.N + col + 3] = c2.w * params.alpha;
+    }
+
+    if (row + 3 < params.M && col < params.N) {
+        params.c_ptr.values[(row + 3) * params.N + col] = c3.x * params.alpha;
+    }
+    if (row + 3 < params.M && col + 1 < params.N) {
+        params.c_ptr.values[(row + 3) * params.N + col + 1] = c3.y * params.alpha;
+    }
+    if (row + 3 < params.M && col + 2 < params.N) {
+        params.c_ptr.values[(row + 3) * params.N + col + 2] = c3.z * params.alpha;
+    }
+    if (row + 3 < params.M && col + 3 < params.N) {
+        params.c_ptr.values[(row + 3) * params.N + col + 3] = c3.w * params.alpha;
+    }
+
+    if (row + 4 < params.M && col < params.N) {
+        params.c_ptr.values[(row + 4) * params.N + col] = c4.x * params.alpha;
+    }
+    if (row + 4 < params.M && col + 1 < params.N) {
+        params.c_ptr.values[(row + 4) * params.N + col + 1] = c4.y * params.alpha;
+    }
+    if (row + 4 < params.M && col + 2 < params.N) {
+        params.c_ptr.values[(row + 4) * params.N + col + 2] = c4.z * params.alpha;
+    }
+    if (row + 4 < params.M && col + 3 < params.N) {
+        params.c_ptr.values[(row + 4) * params.N + col + 3] = c4.w * params.alpha;
+    }
+
+    if (row + 5 < params.M && col < params.N) {
+        params.c_ptr.values[(row + 5) * params.N + col] = c5.x * params.alpha;
+    }
+    if (row + 5 < params.M && col + 1 < params.N) {
+        params.c_ptr.values[(row + 5) * params.N + col + 1] = c5.y * params.alpha;
+    }
+    if (row + 5 < params.M && col + 2 < params.N) {
+        params.c_ptr.values[(row + 5) * params.N + col + 2] = c5.z * params.alpha;
+    }
+    if (row + 5 < params.M && col + 3 < params.N) {
+        params.c_ptr.values[(row + 5) * params.N + col + 3] = c5.w * params.alpha;
+    }
+
+    if (row + 6 < params.M && col < params.N) {
+        params.c_ptr.values[(row + 6) * params.N + col] = c6.x * params.alpha;
+    }
+    if (row + 6 < params.M && col + 1 < params.N) {
+        params.c_ptr.values[(row + 6) * params.N + col + 1] = c6.y * params.alpha;
+    }
+    if (row + 6 < params.M && col + 2 < params.N) {
+        params.c_ptr.values[(row + 6) * params.N + col + 2] = c6.z * params.alpha;
+    }
+    if (row + 6 < params.M && col + 3 < params.N) {
+        params.c_ptr.values[(row + 6) * params.N + col + 3] = c6.w * params.alpha;
+    }
+
+    if (row + 7 < params.M && col < params.N) {
+        params.c_ptr.values[(row + 7) * params.N + col] = c7.x * params.alpha;
+    }
+    if (row + 7 < params.M && col + 1 < params.N) {
+        params.c_ptr.values[(row + 7) * params.N + col + 1] = c7.y * params.alpha;
+    }
+    if (row + 7 < params.M && col + 2 < params.N) {
+        params.c_ptr.values[(row + 7) * params.N + col + 2] = c7.z * params.alpha;
+    }
+    if (row + 7 < params.M && col + 3 < params.N) {
+        params.c_ptr.values[(row + 7) * params.N + col + 3] = c7.w * params.alpha;
+    }
 }
