@@ -29,16 +29,25 @@ bool InferenceEngine::initialize(const InferenceConfig& config) {
     offload_manager_ = std::make_unique<OffloadManager>();
     prefetch_engine_ = std::make_unique<PrefetchEngine>(model_.get());
     tokenizer_ = std::make_unique<Tokenizer>();
+    quantization_manager_ = std::make_unique<QuantizationManager>();
+
+    QuantizationConfig q_config;
+    quantization_manager_->initialize(q_config);
 
     if (gpu_enabled_.load()) {
         vulkan::VulkanConfig vk_config;
         vk_config.enable_validation = config.enable_validation;
+        vk_config.enable_robust_error_handling = true;
 
-        vulkan_context_ = std::make_unique<vulkan::VulkanContext>(vk_config);
-        if (!vulkan_context_->is_initialized()) {
-            std::cerr << "Failed to initialize Vulkan context, falling back to CPU" << std::endl;
-            gpu_enabled_.store(false);
-        } else {
+        try {
+            vulkan_context_ = std::make_unique<vulkan::VulkanContext>(vk_config);
+            if (!vulkan_context_->is_initialized()) {
+                throw std::runtime_error("Vulkan context initialization failed");
+            }
+
+            if (!vulkan_context_->has_validation()) {
+                std::cout << "[InferenceEngine] Validation layers not available, continuing without validation" << std::endl;
+            }
             vulkan_memory_ = std::make_unique<vulkan::VulkanMemory>(
                 vulkan_context_->get_device(),
                 vulkan_context_->get_physical_device()
@@ -65,7 +74,20 @@ bool InferenceEngine::initialize(const InferenceConfig& config) {
             );
 
             if (!timeline_semaphores_->initialize()) {
-                std::cerr << "Failed to initialize timeline semaphores" << std::endl;
+                std::cerr << "[InferenceEngine] Timeline semaphores not available, falling back to fence-based synchronization" << std::endl;
+            }
+
+            async_pipeline_ = std::make_unique<vulkan::AsyncPipelineManager>(
+                vulkan_context_->get_device(),
+                vulkan_context_->get_compute_queue(),
+                vulkan_context_->get_compute_queue(),
+                vulkan_context_->get_compute_queue_family(),
+                vulkan_context_->get_compute_queue_family()
+            );
+
+            if (!async_pipeline_->initialize()) {
+                std::cerr << "[InferenceEngine] Async pipeline manager initialization failed" << std::endl;
+                async_pipeline_.reset();
             }
 
             compute_dispatcher_ = std::make_unique<vulkan::ComputeDispatcher>(
@@ -74,6 +96,24 @@ bool InferenceEngine::initialize(const InferenceConfig& config) {
                 vulkan_context_->get_compute_queue_family(),
                 timeline_semaphores_.get()
             );
+
+            std::cout << "[InferenceEngine] Vulkan backend initialized successfully" << std::endl;
+
+        } catch (const std::exception& e) {
+            std::cerr << "[InferenceEngine] Vulkan initialization failed: " << e.what() << std::endl;
+            std::cerr << "[InferenceEngine] Falling back to CPU backend" << std::endl;
+
+            vulkan_context_.reset();
+            vulkan_memory_.reset();
+            shader_compiler_.reset();
+            pipeline_cache_.reset();
+            descriptor_pool_.reset();
+            transfer_engine_.reset();
+            timeline_semaphores_.reset();
+            compute_dispatcher_.reset();
+
+            gpu_enabled_.store(false);
+            config_.backend = BackendType::CPU;
         }
     }
 
@@ -101,13 +141,111 @@ bool InferenceEngine::load_model(const std::string& filepath) {
     model_->allocate_tensors();
 
     if (gpu_enabled_.load() && vulkan_memory_ && model_->get_kv_cache()) {
-        model_->get_kv_cache()->allocate_gpu();
+        try {
+            model_->get_kv_cache()->allocate_gpu();
+        } catch (const std::exception& e) {
+            std::cerr << "[InferenceEngine] GPU cache allocation failed: " << e.what() << std::endl;
+            std::cerr << "[InferenceEngine] Falling back to CPU-only mode" << std::endl;
+            gpu_enabled_.store(false);
+            config_.backend = BackendType::CPU;
+        }
     }
 
     return true;
 }
 
     std::string InferenceEngine::generate(const std::string& prompt, uint32_t max_tokens) {
+    std::string result;
+    generate_streaming(prompt, max_tokens, [&result](const std::string& token) {
+        result += token;
+    });
+    return result;
+}
+
+std::string InferenceEngine::generate_with_progress(const std::string& prompt, uint32_t max_tokens,
+                                          ProgressCallback callback) {
+    std::lock_guard<std::mutex> lock(model_mutex_);
+
+    if (!initialized_.load() || !model_) {
+        return "";
+    }
+
+    std::vector<uint32_t> tokens;
+    tokenized(prompt, tokens);
+
+    std::vector<uint32_t> generated;
+    std::vector<float> logits(vocab_size_);
+
+    uint32_t num_layers = model_->get_num_layers();
+    uint32_t hidden_dim = model_->get_hidden_dim();
+
+    auto start_time = std::chrono::steady_clock::now();
+
+    for (uint32_t step = 0; step < max_tokens; ++step) {
+        auto step_start = std::chrono::steady_clock::now();
+
+        std::vector<float> hidden(hidden_dim);
+
+        for (uint32_t layer = 0; layer < num_layers; ++layer) {
+            const inference::LayerWeights& layer_weights = model_->get_layer(layer);
+
+            offload_manager_->update_layer_access(layer);
+
+            if (config_.prefetch_layers > 0 && layer < num_layers - 1) {
+                uint32_t prefetch_count = std::min(config_.prefetch_layers, num_layers - layer - 1);
+                prefetch_engine_->prefetch_next_layers(layer, prefetch_count);
+            }
+
+            forward_layer(layer, step, hidden.data(), hidden.data());
+        }
+
+        float next_token_float = sample_token(logits.data(), vocab_size_);
+        uint32_t next_token = static_cast<uint32_t>(next_token_float);
+        generated.push_back(next_token);
+        tokens.push_back(next_token);
+
+        std::string token_text;
+        if (tokenizer_) {
+            token_text = tokenizer_->decode({next_token});
+        } else {
+            token_text = std::string(1, static_cast<char>(next_token));
+        }
+
+        if (tokens.size() >= config_.context_len) {
+            tokens = std::vector<uint32_t>(tokens.end() - config_.context_len, tokens.end());
+        }
+
+        auto step_end = std::chrono::steady_clock::now();
+        auto total_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(step_end - start_time).count();
+        auto step_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(step_end - step_start).count();
+
+        if (callback) {
+            GenerationProgress progress;
+            progress.current_step = step + 1;
+            progress.total_steps = max_tokens;
+            progress.progress_pct = static_cast<float>(step + 1) / max_tokens * 100.0f;
+            progress.time_elapsed_ms = static_cast<float>(total_elapsed);
+            progress.estimated_remaining_ms = (step_elapsed * (max_tokens - step - 1));
+            progress.tokens_per_second = (step + 1) / (total_elapsed / 1000.0f);
+            progress.last_token = token_text;
+
+            callback(progress);
+        }
+    }
+
+    if (tokenizer_) {
+        return tokenizer_->decode(generated);
+    } else {
+        std::string result;
+        for (uint32_t token : generated) {
+            result += static_cast<char>(token);
+        }
+        return result;
+    }
+}
+
+std::string InferenceEngine::generate_streaming(const std::string& prompt, uint32_t max_tokens,
+                                      StreamCallback callback) {
     std::lock_guard<std::mutex> lock(model_mutex_);
 
     if (!initialized_.load() || !model_) {
@@ -144,20 +282,23 @@ bool InferenceEngine::load_model(const std::string& filepath) {
         generated.push_back(next_token);
         tokens.push_back(next_token);
 
+        std::string token_text;
+        if (tokenizer_) {
+            token_text = tokenizer_->decode({next_token});
+        } else {
+            token_text = std::string(1, static_cast<char>(next_token));
+        }
+
+        if (callback) {
+            callback(token_text);
+        }
+
         if (tokens.size() >= config_.context_len) {
             tokens = std::vector<uint32_t>(tokens.end() - config_.context_len, tokens.end());
         }
     }
 
-    if (tokenizer_) {
-        return tokenizer_->decode(generated);
-    } else {
-        std::string result;
-        for (uint32_t token : generated) {
-            result += static_cast<char>(token);
-        }
-        return result;
-    }
+    return "";
 }
 
 void InferenceEngine::tokenized(const std::string& prompt, std::vector<uint32_t>& tokens) {
@@ -200,12 +341,19 @@ float InferenceEngine::sample_token(const float* logits, uint32_t vocab_size) {
 }
 
 vulkan::ComputeWork InferenceEngine::calculate_workgroups(uint32_t n, uint32_t m, uint32_t batch) {
-    vulkan::ComputeWork work;
-    uint32_t local_size_x = 256;
-    uint32_t local_size_y = 1;
+    if (!vulkan_context_) {
+        vulkan::ComputeWork work;
+        work.group_count_x = (n + 255) / 256;
+        work.group_count_y = (m + 0) / 1;
+        work.group_count_z = batch;
+        return work;
+    }
 
-    work.group_count_x = (n + local_size_x - 1) / local_size_x;
-    work.group_count_y = (m + local_size_y - 1) / local_size_y;
+    vulkan::WorkgroupSize wg = vulkan_context_->calculate_optimal_workgroup_size(n * m);
+
+    vulkan::ComputeWork work;
+    work.group_count_x = (n + wg.x - 1) / wg.x;
+    work.group_count_y = (m + wg.y - 1) / wg.y;
     work.group_count_z = batch;
 
     return work;
@@ -217,21 +365,30 @@ void InferenceEngine::upload_to_gpu(const float* data, VkDeviceSize size,
         return;
     }
 
-    vulkan::VulkanBuffer staging_buffer = vulkan_memory_->create_buffer(
-        size,
-        VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
+    try {
+        vulkan::VulkanBuffer staging_buffer = vulkan_memory_->create_buffer(
+            size,
+            VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
 
-    memcpy(staging_buffer.mapped_ptr, data, size);
+        if (!staging_buffer.mapped_ptr) {
+            throw std::runtime_error("Failed to map staging buffer");
+        }
 
-    {
-        std::lock_guard<std::mutex> lock(transfer_mutex_);
-        transfer_engine_->async_copy(staging_buffer.buffer, gpu_buffer.buffer, size, nullptr);
-        transfer_engine_->wait_all();
+        memcpy(staging_buffer.mapped_ptr, data, size);
+
+        {
+            std::lock_guard<std::mutex> lock(transfer_mutex_);
+            transfer_engine_->async_copy(staging_buffer.buffer, gpu_buffer.buffer, size, nullptr);
+            transfer_engine_->wait_all();
+        }
+
+        vulkan_memory_->destroy_buffer(staging_buffer);
+    } catch (const std::exception& e) {
+        std::cerr << "[InferenceEngine] GPU upload failed: " << e.what() << std::endl;
+        throw;
     }
-
-    vulkan_memory_->destroy_buffer(staging_buffer);
 }
 
 void InferenceEngine::download_from_gpu(VkDeviceSize size, vulkan::VulkanBuffer& gpu_buffer,
@@ -240,21 +397,30 @@ void InferenceEngine::download_from_gpu(VkDeviceSize size, vulkan::VulkanBuffer&
         return;
     }
 
-    vulkan::VulkanBuffer staging_buffer = vulkan_memory_->create_buffer(
-        size,
-        VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
-    );
+    try {
+        vulkan::VulkanBuffer staging_buffer = vulkan_memory_->create_buffer(
+            size,
+            VK_BUFFER_USAGE_TRANSFER_DST_BIT,
+            VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT
+        );
 
-    {
-        std::lock_guard<std::mutex> lock(transfer_mutex_);
-        transfer_engine_->async_copy(gpu_buffer.buffer, staging_buffer.buffer, size, nullptr);
-        transfer_engine_->wait_all();
+        if (!staging_buffer.mapped_ptr) {
+            throw std::runtime_error("Failed to map staging buffer");
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(transfer_mutex_);
+            transfer_engine_->async_copy(gpu_buffer.buffer, staging_buffer.buffer, size, nullptr);
+            transfer_engine_->wait_all();
+        }
+
+        memcpy(output, staging_buffer.mapped_ptr, size);
+
+        vulkan_memory_->destroy_buffer(staging_buffer);
+    } catch (const std::exception& e) {
+        std::cerr << "[InferenceEngine] GPU download failed: " << e.what() << std::endl;
+        throw;
     }
-
-    memcpy(output, staging_buffer.mapped_ptr, size);
-
-    vulkan_memory_->destroy_buffer(staging_buffer);
 }
 
 bool InferenceEngine::supports_flash_attention() const {
@@ -323,6 +489,13 @@ void InferenceEngine::forward_layer_gpu(uint32_t layer_id, const float* input, f
     layout_info.pSetLayouts = nullptr;
 
     VkPipelineLayout layout = pipeline_cache_->get_pipeline_layout(layer_name + "_layout", layout_info);
+
+    if (vulkan_context_->get_subgroup_size() >= 32) {
+        VkPipeline rms_pipeline = pipeline_cache_->get_compute_pipeline("rms_norm_subgroup.glsl", layout_info);
+        if (rms_pipeline != VK_NULL_HANDLE) {
+            compute_dispatcher_->dispatch(rms_pipeline, layout, work);
+        }
+    }
 
     if (should_use_flash_attention(layer_id)) {
         VkPipeline flash_pipeline = pipeline_cache_->get_compute_pipeline("flash_attention.glsl", layout_info);
@@ -405,6 +578,101 @@ bool InferenceEngine::is_gpu_enabled() const {
 
 uint32_t InferenceEngine::get_num_threads() const {
     return config_.num_threads;
+}
+
+uint32_t InferenceEngine::get_model_size() const {
+    return static_cast<uint32_t>(get_model_size_bytes() / (1024 * 1024));
+}
+
+uint32_t InferenceEngine::get_model_layers() const {
+    if (!model_) return 0;
+    return model_->get_num_layers();
+}
+
+uint32_t InferenceEngine::get_hidden_dim() const {
+    if (!model_) return 0;
+    return model_->get_hidden_dim();
+}
+
+uint32_t InferenceEngine::get_context_len() const {
+    if (!model_) return 0;
+    return model_->get_context_len();
+}
+
+uint32_t InferenceEngine::get_num_heads() const {
+    if (!model_) return 0;
+    return model_->get_num_heads();
+}
+
+float InferenceEngine::get_acceptance_rate() const {
+    return 0.0f;
+}
+
+float InferenceEngine::get_throughput() const {
+    return 0.0f;
+}
+
+bool InferenceEngine::save_pipeline_cache(const std::string& path) {
+    if (!pipeline_cache_) return false;
+    return pipeline_cache_->save_to_disk(path);
+}
+
+bool InferenceEngine::load_pipeline_cache(const std::string& path) {
+    if (!pipeline_cache_) return false;
+    return pipeline_cache_->load_from_disk(path);
+}
+
+void InferenceEngine::enable_profiling(bool enable) {
+}
+
+std::string InferenceEngine::get_performance_report() const {
+    return "Profiling not enabled";
+}
+
+std::vector<float> InferenceEngine::get_token_logits(const std::vector<uint32_t>& tokens) {
+    return std::vector<float>();
+}
+
+void InferenceEngine::set_adapter_alpha(const std::string& adapter_name, float alpha) {
+}
+
+void InferenceEngine::enable_adapter(const std::string& adapter_name) {
+}
+
+void InferenceEngine::disable_adapter(const std::string& adapter_name) {
+}
+
+std::vector<std::string> InferenceEngine::get_loaded_adapters() const {
+    return std::vector<std::string>();
+}
+
+void InferenceEngine::set_quantization_enabled(bool enabled) {
+    std::lock_guard<std::mutex> lock(model_mutex_);
+    QuantizationConfig config = quantization_manager_->get_config();
+    if (enabled) {
+        config.weight_quantization = QuantizationType::INT8;
+    } else {
+        config.weight_quantization = QuantizationType::NONE;
+    }
+    quantization_manager_->initialize(config);
+}
+
+void InferenceEngine::set_weight_quantization(QuantizationType type) {
+    std::lock_guard<std::mutex> lock(model_mutex_);
+    QuantizationConfig config = quantization_manager_->get_config();
+    config.weight_quantization = type;
+    quantization_manager_->initialize(config);
+}
+
+void InferenceEngine::set_activation_quantization(QuantizationType type) {
+    std::lock_guard<std::mutex> lock(model_mutex_);
+    QuantizationConfig config = quantization_manager_->get_config();
+    config.activation_quantization = type;
+    quantization_manager_->initialize(config);
+}
+
+QuantizationConfig InferenceEngine::get_quantization_config() const {
+    return quantization_manager_->get_config();
 }
 
 size_t InferenceEngine::get_model_size_bytes() const {

@@ -2,12 +2,13 @@
 
 namespace vulkan {
 
-VulkanMemory::VulkanMemory(VkDevice device) : device_(device) {}
+VulkanMemory::VulkanMemory(VkDevice device, VkPhysicalDevice physical_device)
+    : device_(device), physical_device_(physical_device) {}
 
 VulkanMemory::~VulkanMemory() {
 }
 
-VulkanBuffer VulkanMemory::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage, 
+VulkanBuffer VulkanMemory::create_buffer(VkDeviceSize size, VkBufferUsageFlags usage,
                                          VkMemoryPropertyFlags properties) {
     VulkanBuffer buffer{};
     buffer.size = size;
@@ -67,7 +68,16 @@ void VulkanMemory::copy_buffer(VkCommandBuffer cmd, VulkanBuffer src, VulkanBuff
 }
 
 uint32_t VulkanMemory::find_memory_type(uint32_t type_filter, VkMemoryPropertyFlags properties) {
-    return 0;
+    VkPhysicalDeviceMemoryProperties mem_properties;
+    vkGetPhysicalDeviceMemoryProperties(physical_device_, &mem_properties);
+
+    for (uint32_t i = 0; i < mem_properties.memoryTypeCount; ++i) {
+        if ((type_filter & (1 << i)) &&
+            (mem_properties.memoryTypes[i].propertyFlags & properties) == properties) {
+            return i;
+        }
+    }
+    return UINT32_MAX;
 }
 
 }

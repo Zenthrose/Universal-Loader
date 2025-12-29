@@ -27,6 +27,9 @@ public:
     void set_location(TensorLocation loc) { location_ = loc; }
     
     void* get_cpu_data() const { return cpu_data_; }
+    
+    size_t get_size() const { return size_; }
+    
     uint64_t get_gpu_buffer() const { return gpu_buffer_; }
     
     void allocate_cpu();

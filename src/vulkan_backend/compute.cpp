@@ -2,8 +2,10 @@
 
 namespace vulkan {
 
-ComputeDispatcher::ComputeDispatcher(VkDevice device, VkQueue queue, uint32_t queue_family)
-    : device_(device), queue_(queue), queue_family_(queue_family) {
+ComputeDispatcher::ComputeDispatcher(VkDevice device, VkQueue queue, uint32_t queue_family,
+                                         TimelineSemaphores* timeline_semaphores)
+    : device_(device), queue_(queue), queue_family_(queue_family),
+      timeline_semaphores_(timeline_semaphores), next_timeline_value_(1) {
 
     VkCommandPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -50,7 +52,31 @@ void ComputeDispatcher::dispatch(VkPipeline pipeline, VkPipelineLayout layout,
     submit_info.commandBufferCount = 1;
     submit_info.pCommandBuffers = &cmd;
 
-    vkQueueSubmit(queue_, 1, &submit_info, fence_);
+    if (timeline_semaphores_ && timeline_semaphores_->initialize()) {
+        uint64_t timeline_value = next_timeline_value_.load();
+
+        VkTimelineSemaphoreSubmitInfoKHR timeline_info{};
+        timeline_info.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO_KHR;
+        timeline_info.signalSemaphoreValueCount = 1;
+        timeline_info.pSignalSemaphoreValues = &timeline_value;
+
+        VkSemaphoreSubmitInfoKHR signal_info{};
+        signal_info.sType = VK_STRUCTURE_TYPE_SEMAPHORE_SUBMIT_INFO_KHR;
+        signal_info.semaphore = timeline_semaphores_->get_semaphore(0);
+        signal_info.value = timeline_value;
+        signal_info.stageMask = VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT;
+
+        submit_info.pNext = &timeline_info;
+        submit_info.signalSemaphoreCount = 1;
+        submit_info.pSignalSemaphores = &signal_info.semaphore;
+
+        vkQueueSubmit(queue_, 1, &submit_info, VK_NULL_HANDLE);
+
+        timeline_semaphores_->signal(0, timeline_value);
+        next_timeline_value_++;
+    } else {
+        vkQueueSubmit(queue_, 1, &submit_info, fence_);
+    }
 }
 
 void ComputeDispatcher::dispatch(VkPipeline pipeline, VkPipelineLayout layout,
@@ -85,8 +111,13 @@ void ComputeDispatcher::dispatch(VkPipeline pipeline, VkPipelineLayout layout,
 }
 
 void ComputeDispatcher::wait_for_completion() {
-    vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
-    vkResetFences(device_, 1, &fence_);
+    if (timeline_semaphores_ && timeline_semaphores_->initialize()) {
+        uint64_t target_value = next_timeline_value_.load() - 1;
+        timeline_semaphores_->wait(0, target_value, UINT64_MAX);
+    } else {
+        vkWaitForFences(device_, 1, &fence_, VK_TRUE, UINT64_MAX);
+        vkResetFences(device_, 1, &fence_);
+    }
 }
 
 }

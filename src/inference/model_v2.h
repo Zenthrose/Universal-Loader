@@ -2,8 +2,11 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <map>
+#include <cstdint>
 #include "../core/gguf_types.h"
 #include "../core/tensor.h"
+#include "../core/gguf_parser.h"
 
 namespace inference {
 
@@ -66,10 +69,10 @@ private:
     std::vector<float*> v_cache_;
 };
 
-class Model {
+class ModelV2 {
 public:
-    Model();
-    ~Model();
+    ModelV2();
+    ~ModelV2();
 
     bool load_from_gguf(const std::string& filepath);
     void allocate_tensors();

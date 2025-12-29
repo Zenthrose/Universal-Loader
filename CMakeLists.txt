@@ -45,13 +45,41 @@ if(WIN32)
         
         message(STATUS "MinGW64 Vulkan libraries: ${VULKAN_LIBRARIES}")
     endif()
+    
+    # Enable Vulkan-Hpp for RAII and type safety with dynamic loading
+    set(VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1)
+    add_compile_definitions(VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
+    add_compile_definitions(VULKAN_HPP_ENABLE_DYNAMIC_LOADER_TOOL=1)
+    
+    # Enable exceptions for better error handling
+    set(VULKAN_HPP_NO_EXCEPTIONS OFF)
+    set(VULKAN_HPP_NO_TO_STRING OFF)
+    add_compile_definitions(VULKAN_HPP_ASSERT_ON_ASSERT=1)
+    
+    # Enable all Vulkan extensions we need
+    add_compile_definitions(VK_ENABLE_BETA_EXTENSIONS=1)
 elseif(UNIX AND NOT APPLE)
     find_package(Vulkan REQUIRED)
     find_library(Volk REQUIRED)
     find_library(VulkanHeaders REQUIRED)
+    
+    # Enable Vulkan-Hpp for Linux
+    set(VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1)
+    add_compile_definitions(VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
+    add_compile_definitions(VULKAN_HPP_ENABLE_DYNAMIC_LOADER_TOOL=1)
+    add_compile_definitions(VULKAN_HPP_ASSERT_ON_ASSERT=1)
+    add_compile_definitions(VK_ENABLE_BETA_EXTENSIONS=1)
 elseif(UNIX AND APPLE)
     find_library(Vulkan REQUIRED)
     find_library(MoltenVK REQUIRED)
+    
+    # Enable Vulkan-Hpp for macOS (MoltenVK support)
+    set(VULKAN_HPP_DISPATCH_LOADER_DYNAMIC 1)
+    add_compile_definitions(VULKAN_HPP_DISPATCH_LOADER_DYNAMIC=1)
+    add_compile_definitions(VULKAN_HPP_ENABLE_DYNAMIC_LOADER_TOOL=1)
+    add_compile_definitions(VULKAN_HPP_ENABLE_PORTABILITY_SUBSET=1)
+    add_compile_definitions(VULKAN_HPP_ASSERT_ON_ASSERT=1)
+    add_compile_definitions(VK_ENABLE_BETA_EXTENSIONS=1)
 endif()
 
 include_directories(${Vulkan_INCLUDE_DIRS})
@@ -94,31 +122,46 @@ set(VULKAN_BACKEND_SOURCES
     src/vulkan_backend/descriptors.cpp
     src/vulkan_backend/timeline_semaphores.h
     src/vulkan_backend/timeline_semaphores.cpp
+    src/vulkan_backend/async_pipeline.h
+    src/vulkan_backend/async_pipeline.cpp
+    src/vulkan_backend/device_address_memory.h
+    src/vulkan_backend/device_address_memory.cpp
+    src/vulkan_backend/multi_gpu_manager.h
+    src/vulkan_backend/multi_gpu_manager.cpp
+    src/vulkan_backend/profiler.h
+    src/vulkan_backend/profiler.cpp
 )
 
 set(INFERENCE_SOURCES
     src/inference/model.h
     src/inference/model.cpp
-    src/inference/model_v2.h
-    src/inference/model_v2.cpp
-    src/inference/tokenizer.h
-    src/inference/tokenizer.cpp
-    src/inference/bpe_tokenizer.h
-    src/inference/bpe_tokenizer.cpp
     src/inference/inference_engine.h
     src/inference/inference_engine.cpp
+    src/inference/tokenizer.h
+    src/inference/tokenizer.cpp
     src/inference/lru_cache.h
     src/inference/lru_cache.cpp
     src/inference/offload_manager.h
     src/inference/offload_manager.cpp
     src/inference/prefetch_engine.h
     src/inference/prefetch_engine.cpp
-    src/inference/tool_metadata_parser.h
-    src/inference/tool_metadata_parser.cpp
-    src/inference/tool_registry.h
-    src/inference/tool_registry.cpp
-    src/inference/tool_calling_engine.h
-    src/inference/tool_calling_engine.cpp
+    src/inference/speculative_decoder.h
+    src/inference/speculative_decoder.cpp
+    src/inference/continuous_batcher.h
+    src/inference/continuous_batcher.cpp
+    src/inference/lora_manager.h
+    src/inference/lora_manager.cpp
+)
+
+set(API_SOURCES
+    src/api/inference_api.h
+    src/api/inference_api.cpp
+)
+
+set(TEST_SOURCES
+    tests/test_suite.h
+    tests/test_suite.cpp
+    tests/test_main.cpp
 )
 
 file(GLOB SHADERS
@@ -150,13 +193,17 @@ target_link_libraries(vulkan_backend ${Vulkan_LIBRARIES})
 add_library(inference STATIC ${INFERENCE_SOURCES} ${CORE_SOURCES} ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})
 target_link_libraries(inference ${Vulkan_LIBRARIES})
 
-set(API_SOURCES
+set(GGUF_LOADER_SOURCES
     src/api/gguf_loader.h
     src/api/gguf_loader.cpp
 )
 
-add_library(gguf_api STATIC ${API_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES})
+add_library(gguf_api STATIC ${GGUF_LOADER_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES})
 target_link_libraries(gguf_api ${Vulkan_LIBRARIES})
+
+find_package(pybind11 CONFIG REQUIRED)
+pybind11_add_module(vulkangguf PRIVATE ${API_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES} ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})
+target_link_libraries(vulkangguf PRIVATE ${Vulkan_LIBRARIES})
 
 add_executable(test_core tests/test_core.cpp ${CORE_SOURCES})
 target_link_libraries(test_core ${Vulkan_LIBRARIES})

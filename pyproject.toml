@@ -1,0 +1,136 @@
+cmake_minimum_required(VERSION 3.20)
+project(vulkangguf VERSION 1.0.0 LANGUAGES CXX CXX)
+
+set(CMAKE_CXX_STANDARD 20)
+set(CMAKE_CXX_STANDARD_REQUIRED ON)
+set(CMAKE_CXX_EXTENSIONS OFF)
+
+set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
+
+# Platform-specific settings
+if(WIN32)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /MP /O2")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} /W4")
+elseif(APPLE)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wno-deprecated-declarations")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra")
+endif()
+
+# Find Vulkan SDK
+find_package(Vulkan REQUIRED)
+
+# Find pybind11 if Python bindings are enabled
+option(BUILD_PYTHON_BINDINGS "Build Python bindings" ON)
+
+if(BUILD_PYTHON_BINDINGS)
+    find_package(pybind11 REQUIRED)
+    find_package(Threads REQUIRED)
+endif()
+
+# Find glslangValidator for runtime shader compilation
+option(BUILD_GLSLANG_VALIDATOR "Build with glslangValidator integration" OFF)
+
+# Source files
+set(SOURCES
+    ${CORE_SOURCES}
+    ${INFERENCE_SOURCES}
+    ${VULKAN_BACKEND_SOURCES}
+    ${CPU_BACKEND_SOURCES}
+    ${API_SOURCES}
+    ${TEST_SOURCES}
+)
+
+# Create library
+add_library(vulkangguf SHARED ${SOURCES})
+
+# Link libraries
+if(WIN32)
+    target_link_libraries(vulkangguf ${Vulkan_LIBRARIES})
+endif()
+
+# Python bindings
+if(BUILD_PYTHON_BINDINGS)
+    pybind11_add_module(vulkangguf src/api/inference_api.cpp)
+    target_link_libraries(vulkangguf PRIVATE pybind11::module Threads::Threads)
+endif()
+
+# Tests
+enable_testing()
+enable_testing()
+add_subdirectory(tests)
+
+# Installation
+install(TARGETS vulkangguf
+if(BUILD_PYTHON_BINDINGS)
+    install(TARGETS vulkangguf_python DESTINATION ${PYTHON_SITE_PACKAGES})
+endif()
+
+# Build type
+if(WIN32)
+    set(BUILD_SHARED_LIBS OFF)
+else()
+    set(BUILD_SHARED_LIBS ON)
+endif()
+
+# Compiler flags
+if(CMAKE_BUILD_TYPE MATCHES Debug)
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -g -O0 -DDEBUG")
+else()
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O3 -DNDEBUG")
+endif()
+
+# Tests
+if(BUILD_TESTING)
+    enable_testing()
+    add_subdirectory(tests)
+endif()
+
+# GPU memory settings
+set(VULKAN_GPU_MEMORY_POOL_SIZE_MB 1024 CACHE STRING "GPU memory pool size in MB")
+set(VULKAN_GPU_CACHE_SIZE_MB 1024 CACHE STRING "GPU cache size in MB")
+
+# Optional features
+option(ENABLE_SPECULATIVE_DECODING "Enable speculative decoding" ON)
+option(ENABLE_MULTI_GPU "Enable multi-GPU support" OFF)
+option(ENABLE_BINDLESS_DESCRIPTORS "Enable bindless descriptors" OFF)
+option(ENABLE_COOPERATIVE_MATRIX "Enable cooperative matrix support" AUTO")
+
+# Feature detection
+include(CheckIncludeFiles)
+include(CheckSymbolExists)
+
+check_include_files("vulkan/vulkan.hpp" HAVE_VULKAN_HPP)
+check_include_files("vulkan/vulkan_core.h" HAVE_VULKAN_CORE_H)
+
+if(HAVE_VULKAN_HPP)
+    message(STATUS "Vulkan-Hpp found - using RAII bindings")
+    set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DVULKAN_HPP_HPP")
+else()
+    message(STATUS "Vulkan-Hpp not found - using C API")
+endif()
+
+if(ENABLE_SPECULATIVE_DECODING)
+    add_compile_definitions(-DVULKANGGUF_SPECULATIVE_DECODING)
+endif()
+
+if(ENABLE_MULTI_GPU)
+    add_compile_definitions(-DVULKANGGUF_MULTI_GPU)
+    add_compile_definitions(-DVULKAN_KHR_device_group)
+endif()
+
+if(ENABLE_BINDLESS_DESCRIPTORS)
+    add_compile_definitions(-DVULKANGGUF_BINDLESS_DESCRIPTORS)
+    add_compile_definitions(-DVULKAN_EXT_descriptor_indexing)
+endif()
+
+if(ENABLE_COOPERATIVE_MATRIX)
+    add_compile_definitions(-DVULKANGGUF_COOPERATIVE_MATRIX)
+    add_compile_definitions(-DVULKAN_KHR_cooperative_matrix)
+endif()
+
+# Output directories
+set(CMAKE_RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib)
+set(CMAKE_LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin)

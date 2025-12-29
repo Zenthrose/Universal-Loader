@@ -263,4 +263,20 @@ double GGUFParser::read_f64(std::ifstream& file) {
     return *reinterpret_cast<double*>(&value);
 }
 
+
+bool GGUFParser::read_tensor_data_direct(const TensorInfo& tensor, uint8_t* target_buffer, size_t buffer_size) {
+    if (!valid_ || !file_.is_open()) {
+        return false;
+    }
+    
+    if (!target_buffer || buffer_size < tensor.size_bytes) {
+        return false;
+    }
+    
+    file_.seekg(data_offset_ + tensor.offset);
+    file_.read(reinterpret_cast<char*>(target_buffer), tensor.size_bytes);
+    
+    return true;
+}
+
 }
