@@ -15,6 +15,22 @@ VulkanContext::VulkanContext(const VulkanConfig& config)
         return;
     }
     query_device_properties();
+
+    // Check for required Vulkan extensions
+    bool has_required_extensions = supports_buffer_device_address_ && supports_timeline_semaphore_ && supports_device_group_;
+    if (!has_required_extensions) {
+        std::cerr << "[VulkanContext] ERROR: Required Vulkan extensions not supported on this device:" << std::endl;
+        if (!supports_buffer_device_address_) std::cerr << "  - VK_KHR_buffer_device_address" << std::endl;
+        if (!supports_timeline_semaphore_) std::cerr << "  - VK_KHR_timeline_semaphore" << std::endl;
+        if (!supports_device_group_) std::cerr << "  - VK_KHR_device_group" << std::endl;
+        std::cerr << "Please ensure your GPU and drivers support Vulkan 1.3+ and the required extensions." << std::endl;
+        initialized_ = false;
+        return;
+    }
+    if (!supports_cooperative_matrix_) {
+        std::cout << "[VulkanContext] WARNING: VK_KHR_cooperative_matrix not supported. Some optimizations may be unavailable." << std::endl;
+    }
+
     if (!find_queue_families()) {
         return;
     }
@@ -174,6 +190,8 @@ void VulkanContext::query_device_properties() {
     supports_portability_subset_ = false;
     supports_buffer_device_address_ = false;
     supports_cooperative_matrix_ = false;
+    supports_timeline_semaphore_ = false;
+    supports_device_group_ = false;
 
     for (const auto& ext : extensions) {
         if (strcmp(ext.extensionName, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME) == 0) {
@@ -187,6 +205,14 @@ void VulkanContext::query_device_properties() {
         if (strcmp(ext.extensionName, VK_KHR_COOPERATIVE_MATRIX_EXTENSION_NAME) == 0) {
             supports_cooperative_matrix_ = true;
             std::cout << "[VulkanContext] Device supports VK_KHR_cooperative_matrix" << std::endl;
+        }
+        if (strcmp(ext.extensionName, VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME) == 0) {
+            supports_timeline_semaphore_ = true;
+            std::cout << "[VulkanContext] Device supports VK_KHR_timeline_semaphore" << std::endl;
+        }
+        if (strcmp(ext.extensionName, VK_KHR_DEVICE_GROUP_EXTENSION_NAME) == 0) {
+            supports_device_group_ = true;
+            std::cout << "[VulkanContext] Device supports VK_KHR_device_group" << std::endl;
         }
     }
 
@@ -227,7 +253,12 @@ bool VulkanContext::create_logical_device() {
     buffer_address_features.bufferDeviceAddress = VK_TRUE;
 
     std::vector<const char*> device_extensions;
-    device_extensions.push_back(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+    if (supports_timeline_semaphore_) {
+        device_extensions.push_back(VK_KHR_TIMELINE_SEMAPHORE_EXTENSION_NAME);
+    }
+    if (supports_device_group_) {
+        device_extensions.push_back(VK_KHR_DEVICE_GROUP_EXTENSION_NAME);
+    }
 
     void* p_next = nullptr;
     if (supports_buffer_device_address_) {

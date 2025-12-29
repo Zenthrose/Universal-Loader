@@ -37,6 +37,9 @@ public:
     void start_timing(const std::string& operation, uint32_t layer_id = 0);
     void end_timing(const std::string& operation, uint32_t layer_id = 0);
 
+    void start_gpu_timing(VkCommandBuffer cmd, const std::string& operation, uint32_t layer_id = 0);
+    void end_gpu_timing(VkCommandBuffer cmd, const std::string& operation, uint32_t layer_id = 0);
+
     void record_memory_usage(size_t bytes_used);
     void record_tokens_generated(uint32_t tokens);
 
@@ -54,6 +57,7 @@ private:
     void create_query_pool();
     void destroy_query_pool();
     uint64_t get_timestamp_ns(uint32_t query_id);
+    void collect_gpu_timings();
 
     VkDevice device_;
     VkPhysicalDevice physical_device_;
@@ -68,6 +72,10 @@ private:
 
     std::atomic<uint64_t> peak_memory_bytes_;
     std::atomic<uint32_t> tokens_generated_;
+
+    uint32_t current_query_id_;
+    std::map<std::string, uint32_t> gpu_start_queries_;
+    std::map<std::string, uint32_t> gpu_end_queries_;
 };
 
 }
