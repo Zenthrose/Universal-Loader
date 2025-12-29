@@ -191,6 +191,7 @@ void VulkanContext::query_device_properties() {
     supports_cooperative_matrix_ = false;
     supports_timeline_semaphore_ = false;
     supports_device_group_ = false;
+    supports_float16_int8_ = false;
 
     for (const auto& ext : extensions) {
         if (strcmp(ext.extensionName, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME) == 0) {
@@ -212,6 +213,10 @@ void VulkanContext::query_device_properties() {
         if (strcmp(ext.extensionName, VK_KHR_DEVICE_GROUP_EXTENSION_NAME) == 0) {
             supports_device_group_ = true;
             std::cout << "[VulkanContext] Device supports VK_KHR_device_group" << std::endl;
+        }
+        if (strcmp(ext.extensionName, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME) == 0) {
+            supports_float16_int8_ = true;
+            std::cout << "[VulkanContext] Device supports VK_KHR_shader_float16_int8" << std::endl;
         }
     }
 

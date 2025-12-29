@@ -157,10 +157,10 @@ std::vector<float> WeightMergingStrategy::merge_weights(
     uint32_t tensor_size,
     Method method) {
 
-    std::vector<float*> adapter_weight_ptrs;
-
-    for (const auto& [name, weight] : weighted_adapters) {
-        adapter_weight_ptrs.push_back(const_cast<float*>(weight));
+    std::vector<const float*> adapter_weight_ptrs;
+    for (const auto& adapter : adapters) {
+        const auto& [name, weight] = adapter;
+        adapter_weight_ptrs.push_back(&weight);
     }
 
     std::vector<float> weights;
@@ -205,7 +205,7 @@ std::vector<float> WeightMergingStrategy::linear_merge(
 }
 
 std::vector<float> WeightMergingStrategy::additive_merge(
-    const std::vector<float*>& adapter_weights,
+    const std::vector<const float*>& adapter_weights,
     const std::vector<float>& weights,
     const float* base,
     uint32_t size) {

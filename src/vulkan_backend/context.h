@@ -78,6 +78,7 @@ private:
     bool supports_cooperative_matrix_;
     bool supports_timeline_semaphore_;
     bool supports_device_group_;
+    bool supports_float16_int8_;
 
     std::unique_ptr<ValidationLayer> validation_layer_;
 };
