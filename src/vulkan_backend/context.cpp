@@ -192,6 +192,8 @@ void VulkanContext::query_device_properties() {
     supports_timeline_semaphore_ = false;
     supports_device_group_ = false;
     supports_float16_int8_ = false;
+    supports_video_decode_ = false;
+    supports_external_memory_ = false;
 
     for (const auto& ext : extensions) {
         if (strcmp(ext.extensionName, VK_KHR_PORTABILITY_SUBSET_EXTENSION_NAME) == 0) {
@@ -217,6 +219,14 @@ void VulkanContext::query_device_properties() {
         if (strcmp(ext.extensionName, VK_KHR_SHADER_FLOAT16_INT8_EXTENSION_NAME) == 0) {
             supports_float16_int8_ = true;
             std::cout << "[VulkanContext] Device supports VK_KHR_shader_float16_int8" << std::endl;
+        }
+        if (strcmp(ext.extensionName, VK_KHR_VIDEO_DECODE_QUEUE_EXTENSION_NAME) == 0) {
+            supports_video_decode_ = true;
+            std::cout << "[VulkanContext] Device supports VK_KHR_video_decode_queue" << std::endl;
+        }
+        if (strcmp(ext.extensionName, VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME) == 0) {
+            supports_external_memory_ = true;
+            std::cout << "[VulkanContext] Device supports VK_KHR_external_memory" << std::endl;
         }
     }
 
