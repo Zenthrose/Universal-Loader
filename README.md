@@ -134,6 +134,13 @@ cmake .. -G "Visual Studio 17 2022" -A x64
 cmake --build . --config Release
 ```
 
+### Windows MinGW64/MSYS2 (Recommended for this project)
+```bash
+mkdir build && cd build
+cmake .. -G "Ninja" -DCMAKE_BUILD_TYPE=Release -DCMAKE_CXX_FLAGS="-mavx2 -mfma -mf16c -O3 -ffast-math -static-libgcc -static-libstdc++"
+ninja
+```
+
 ### Windows/WSL/Linux (GCC/Clang)
 ```bash
 mkdir build && cd build
@@ -152,12 +159,19 @@ sudo apt install vulkan-sdk glslang-tools
 # Arch Linux
 sudo pacman -S vulkan-headers vulkan-tools glslang
 
-# Windows
+# Windows MinGW64/MSYS2
+pacman -S mingw-w64-x86_64-vulkan mingw-w64-x86_64-glslang
+# OR download from https://vulkan.lunarg.com/ for MSVC-compatible SDK
+
+# Windows (MSVC)
 # Download and install from https://vulkan.lunarg.com/
 ```
 
 #### CMake and Ninja
 ```bash
+# Windows MinGW64/MSYS2
+pacman -S mingw-w64-x86_64-cmake mingw-w64-x86_64-ninja
+
 # Windows (chocolatey)
 choco install cmake ninja
 
@@ -347,6 +361,14 @@ Your GPU doesn't support Vulkan 1.3. Update drivers or use CPU-only mode:
 engine.set_gpu_enabled(false);
 ```
 
+### Timeline Semaphore Validation Warnings (MinGW64)
+If you see VUID-VkSemaphoreTypeCreateInfo-timelineSemaphore-03252 warnings:
+```bash
+# This is expected with some GPU drivers - functionality still works
+# For production builds, disable validation layers:
+engine.set_validation_enabled(false);
+```
+
 ### "Out of Memory" Errors
 Reduce GPU memory pool or use smaller quantization:
 ```cpp
@@ -364,6 +386,12 @@ engine.set_gpu_memory_pool(1 * 1024 * 1024 * 1024); // Reduce to 1GB
 ### Build Errors
 Ensure all dependencies are installed:
 ```bash
+# MinGW64/MSYS2
+cmake --version  # Should be 3.20+
+glslangValidator --version
+pacman -Q mingw-w64-x86_64-vulkan  # Verify Vulkan package
+
+# Other systems
 cmake --version  # Should be 3.20+
 glslangValidator --version
 vulkaninfo
