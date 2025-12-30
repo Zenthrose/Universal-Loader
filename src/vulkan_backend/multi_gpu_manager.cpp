@@ -1,5 +1,6 @@
 #include "multi_gpu_manager.h"
 #include <iostream>
+#include <cstring>
 
 namespace vulkan {
 
@@ -128,7 +129,8 @@ bool MultiGPUManager::create_device_group() {
     group_create_info.sType = VK_STRUCTURE_TYPE_DEVICE_GROUP_DEVICE_CREATE_INFO;
     group_create_info.physicalDeviceCount = device_group_props_.physicalDeviceCount;
     group_create_info.pPhysicalDevices = config_.physical_devices.data();
-    group_create_info.pPhysicalDeviceMasks = device_group_props_.subsetAllocationMasks;
+    // PRESERVE: experimental multi-GPU mask allocation (requires VK_KHR_device_group)
+    // group_create_info.pPhysicalDeviceMasks = &device_group_props_.subsetAllocationMask;
 
     VkDeviceCreateInfo device_info{};
     device_info.sType = VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO;
@@ -153,20 +155,14 @@ bool MultiGPUManager::create_logical_devices() {
     for (uint32_t i = 0; i < config_.physical_devices.size(); ++i) {
         uint32_t queue_family = 0;
 
-        VkQueueFamilyProperties queue_props;
-        vkGetPhysicalDeviceQueueFamilyProperties(config_.physical_devices[i], &queue_family_count, &queue_props);
-
-        VkPhysicalDeviceQueueFamilyProperties queue_props{};
-        vkGetPhysicalDeviceQueueFamilyProperties(config_.physical_devices[i], &queue_family_count, &queue_props);
-
         uint32_t queue_family_count = 0;
-        vkGetPhysicalDeviceQueueFamilyProperties(config_.physical_devices[i], &queue_family_count, &queue_props);
+        vkGetPhysicalDeviceQueueFamilyProperties(config_.physical_devices[i], &queue_family_count, nullptr);
+
+        std::vector<VkQueueFamilyProperties> queue_props(queue_family_count);
+        vkGetPhysicalDeviceQueueFamilyProperties(config_.physical_devices[i], &queue_family_count, queue_props.data());
 
         for (uint32_t j = 0; j < queue_family_count; ++j) {
-            VkPhysicalDeviceQueueFamilyProperties props{};
-            vkGetPhysicalDeviceQueueFamilyProperties(config_.physical_devices[i], &j, &props);
-
-            if (props.queueFlags & VK_QUEUE_COMPUTE_BIT) {
+            if (queue_props[j].queueFlags & VK_QUEUE_COMPUTE_BIT) {
                 queue_family = j;
                 break;
             }

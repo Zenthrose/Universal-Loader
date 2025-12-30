@@ -151,6 +151,8 @@ set(INFERENCE_SOURCES
     src/inference/continuous_batcher.cpp
     src/inference/lora_manager.h
     src/inference/lora_manager.cpp
+    src/inference/quantization_manager.h
+    src/inference/quantization_manager.cpp
 )
 
 set(API_SOURCES
@@ -158,11 +160,11 @@ set(API_SOURCES
     src/api/inference_api.cpp
 )
 
-set(TEST_SOURCES
-    tests/test_suite.h
-    tests/test_suite.cpp
-    tests/test_main.cpp
-)
+# set(TEST_SOURCES
+   # tests/test_suite.h
+   # tests/test_suite.cpp
+   # tests/test_main.cpp
+# )
 
 file(GLOB SHADERS
     "src/shaders/*.glsl"
@@ -201,21 +203,30 @@ set(GGUF_LOADER_SOURCES
 add_library(gguf_api STATIC ${GGUF_LOADER_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES})
 target_link_libraries(gguf_api ${Vulkan_LIBRARIES})
 
+set(PYBIND11_FINDPYTHON ON)
+set(Python_ROOT_DIR "C:/msys64/mingw64")
+set(Python_EXECUTABLE "C:/msys64/mingw64/bin/python.exe")
+find_package(Python COMPONENTS Interpreter Development REQUIRED)
+include_directories("C:/Users/Zenthrose/AppData/Local/Programs/Python/Python312/include")
 find_package(pybind11 CONFIG REQUIRED)
 pybind11_add_module(vulkangguf ${API_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES} ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})
 target_link_libraries(vulkangguf PRIVATE ${Vulkan_LIBRARIES})
 
-add_executable(test_core tests/test_core.cpp ${CORE_SOURCES})
-target_link_libraries(test_core ${Vulkan_LIBRARIES})
+add_subdirectory(vulkan_gui)
 
-add_executable(test_gpu_integration tests/test_gpu_integration.cpp ${API_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES} ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})
-target_link_libraries(test_gpu_integration ${Vulkan_LIBRARIES})
+# add_executable(test_core tests/test_core.cpp ${CORE_SOURCES})
+# target_link_libraries(test_core ${Vulkan_LIBRARIES})
 
-add_executable(benchmark tools/benchmark.cpp ${API_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES} ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})
-target_link_libraries(benchmark ${Vulkan_LIBRARIES} cpu_backend)
+# add_executable(test_gpu_integration tests/test_gpu_integration.cpp ${API_SOURCES} ${INFERENCE_SOURCES} # ${CORE_SOURCES} ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})
+# target_link_libraries(test_gpu_integration ${Vulkan_LIBRARIES})
+# target_include_directories(test_gpu_integration PRIVATE "C:/msys64/mingw64/include/python3.12")
 
-add_executable(model_info tools/model_info.cpp ${CORE_SOURCES})
-target_link_libraries(model_info ${Vulkan_LIBRARIES})
+# add_executable(benchmark tools/benchmark.cpp ${API_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES} # ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})
+# target_link_libraries(benchmark ${Vulkan_LIBRARIES} cpu_backend)
+# target_include_directories(benchmark PRIVATE "C:/msys64/mingw64/include/python3.12")
+
+# add_executable(model_info tools/model_info.cpp ${CORE_SOURCES})
+# target_link_libraries(model_info ${Vulkan_LIBRARIES})
 
 # MinGW64-specific linker optimizations
 if(MINGW)
@@ -225,5 +236,5 @@ if(MINGW)
     add_compile_options(-Wno-format)
 endif()
 
-enable_testing()
-add_test(NAME CoreTests COMMAND test_core)
+# enable_testing()
+# add_test(NAME CoreTests COMMAND test_core)

@@ -8,7 +8,7 @@ namespace vulkan {
 Profiler::Profiler(VkDevice device, VkPhysicalDevice physical_device)
     : device_(device), physical_device_(physical_device), timestamp_query_pool_(VK_NULL_HANDLE),
       profiling_enabled_(false), timestamps_enabled_(false), timestamp_period_(1),
-      peak_memory_bytes_(0), tokens_generated_(0), current_query_id_(0) {
+      peak_memory_bytes_(0), tokens_generated_(0) {
 
     start_time_ = std::chrono::steady_clock::now();
 }
@@ -23,9 +23,6 @@ void Profiler::begin_profiling() {
     tokens_generated_ = 0;
     peak_memory_bytes_ = 0;
     metrics_.clear();
-    gpu_start_queries_.clear();
-    gpu_end_queries_.clear();
-    current_query_id_ = 0;
 
     std::cout << "[Profiler] Profiling started" << std::endl;
 }
@@ -38,15 +35,13 @@ void Profiler::end_profiling() {
     double total_seconds = duration.count() / 1000.0;
 
     if (total_seconds > 0) {
-        profiling_data_.tokens_per_second = static_cast<double>(tokens_generated_) / total_seconds;
+        profiling_data_.tokens_per_second = static_cast<double>(tokens_generated_.load()) / total_seconds;
     }
-
-    collect_gpu_timings();
 
     profiling_data_.start_time = start_time_;
     profiling_data_.end_time = end_time_;
-    profiling_data_.total_tokens = tokens_generated_;
-    profiling_data_.peak_memory_bytes = peak_memory_bytes_;
+    profiling_data_.total_tokens = tokens_generated_.load();
+    profiling_data_.peak_memory_bytes = peak_memory_bytes_.load();
     profiling_data_.metrics = metrics_;
 
     std::cout << "[Profiler] Profiling ended. Tokens: " << tokens_generated_
@@ -80,13 +75,15 @@ void Profiler::end_timing(const std::string& operation, uint32_t layer_id) {
     metric.layer_id = layer_id;
     metric.operation = operation;
     metric.duration_ms = duration_ms;
-    metric.memory_used_bytes = peak_memory_bytes_;
+    metric.memory_used_bytes = peak_memory_bytes_.load();
 
     metrics_.push_back(metric);
 }
 
 void Profiler::record_memory_usage(size_t bytes_used) {
-    peak_memory_bytes_ = std::max(peak_memory_bytes_, bytes_used);
+    uint64_t current = peak_memory_bytes_.load();
+    while (current < bytes_used && !peak_memory_bytes_.compare_exchange_weak(current, bytes_used)) {
+    }
 }
 
 void Profiler::record_tokens_generated(uint32_t tokens) {
@@ -232,65 +229,6 @@ uint64_t Profiler::get_timestamp_ns(uint32_t query_id) {
     }
 
     return timestamp * timestamp_period_;
-}
-
-void Profiler::start_gpu_timing(VkCommandBuffer cmd, const std::string& operation, uint32_t layer_id) {
-    if (!timestamps_enabled_ || !profiling_enabled_ || timestamp_query_pool_ == VK_NULL_HANDLE) return;
-
-    std::string key = operation + "_" + std::to_string(layer_id);
-    uint32_t start_query = current_query_id_++;
-    gpu_start_queries_[key] = start_query;
-
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT, timestamp_query_pool_, start_query);
-}
-
-void Profiler::end_gpu_timing(VkCommandBuffer cmd, const std::string& operation, uint32_t layer_id) {
-    if (!timestamps_enabled_ || !profiling_enabled_ || timestamp_query_pool_ == VK_NULL_HANDLE) return;
-
-    std::string key = operation + "_" + std::to_string(layer_id);
-    uint32_t end_query = current_query_id_++;
-    gpu_end_queries_[key] = end_query;
-
-    vkCmdWriteTimestamp(cmd, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, timestamp_query_pool_, end_query);
-}
-
-void Profiler::collect_gpu_timings() {
-    if (!timestamps_enabled_ || timestamp_query_pool_ == VK_NULL_HANDLE) return;
-
-    for (const auto& pair : gpu_start_queries_) {
-        const std::string& key = pair.first;
-        uint32_t start_q = pair.second;
-        auto it = gpu_end_queries_.find(key);
-        if (it == gpu_end_queries_.end()) continue;
-
-        uint32_t end_q = it->second;
-        uint64_t start_ts = get_timestamp_ns(start_q);
-        uint64_t end_ts = get_timestamp_ns(end_q);
-
-        if (start_ts == 0 || end_ts == 0 || end_ts < start_ts) continue;
-
-        double duration_ms = (end_ts - start_ts) / 1e6; // ns to ms
-
-        size_t underscore = key.find_last_of('_');
-        if (underscore == std::string::npos) continue;
-
-        std::string op = key.substr(0, underscore);
-        uint32_t layer = 0;
-        try {
-            layer = std::stoi(key.substr(underscore + 1));
-        } catch (...) {
-            continue;
-        }
-
-        PerformanceMetrics metric;
-        metric.timestamp_ns = start_ts;
-        metric.layer_id = layer;
-        metric.operation = op;
-        metric.duration_ms = duration_ms;
-        metric.memory_used_bytes = peak_memory_bytes_;
-
-        metrics_.push_back(metric);
-    }
 }
 
 }

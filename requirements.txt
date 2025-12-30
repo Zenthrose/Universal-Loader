@@ -1,44 +1,16 @@
-[project]
-name = "vulkangguf"
-version = "1.0.0"
-description = "High-Performance Vulkan-Accelerated GGUF Inference Engine"
-readme = "README.md"
-requires-python = ">=3.8"
-keywords = ["vulkan", "gguf", "llm", "inference", "machine-learning"]
+# Universal-Loader Dependencies
+# Vulkan GGUF Inference Engine
 
-[project.optional-dependencies]
-pybind11 = { version = ">=2.11.0" }
+# Python dependencies (all built-in for standard Python installations)
+# - tkinter: Built-in GUI support
+# - threading: Built-in for concurrent execution
 
-[build-system]
-requires = ["setuptools", "wheel", "pybind11"]
-build-backend = "cpp"
+# For building from source:
+pybind11>=2.11.0
+setuptools>=60.0
 
-[tool.cmake]
-generator = "cmake"
-minimum-version = "3.20"
+# For development:
+# pytest>=7.0.0
 
-[tool.cmake-build]
-config = "Release"
-
-[tool.pybind11]
-cflags = ["-O3", "-DNDEBUG"]
-lto = true
-
-[tool.cppbind11.binding]
-# Build the extension module
-# This is handled by CMake
-
-[[tool.pybind11.installed]]
-target = "_vulkangguf"
-sources = [
-    "src/api/inference_api.cpp",
-]
-include_dirs = [
-    "src/",
-    "src/inference/",
-    "src/vulkan_backend/",
-    "src/core/",
-]
-]
-libs = ["vulkangf"]
-extra_compile_args = ["-std=c++17"]
+# Vulkan SDK must be installed separately
+# Download from: https://vulkan.lunarg.com/sdk/home

@@ -5,7 +5,7 @@ namespace vulkan {
 ComputeDispatcher::ComputeDispatcher(VkDevice device, VkQueue queue, uint32_t queue_family,
                                          TimelineSemaphores* timeline_semaphores)
     : device_(device), queue_(queue), queue_family_(queue_family),
-      timeline_semaphores_(timeline_semaphores), profiler_(nullptr), next_timeline_value_(1) {
+      timeline_semaphores_(timeline_semaphores), next_timeline_value_(1) {
 
     VkCommandPoolCreateInfo pool_info{};
     pool_info.sType = VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO;
@@ -27,7 +27,7 @@ ComputeDispatcher::~ComputeDispatcher() {
 }
 
 void ComputeDispatcher::dispatch(VkPipeline pipeline, VkPipelineLayout layout,
-                                  const ComputeWork& work, const std::string& operation, uint32_t layer_id) {
+                                  const ComputeWork& work) {
     VkCommandBufferAllocateInfo alloc_info{};
     alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     alloc_info.commandPool = command_pool_;
@@ -42,12 +42,8 @@ void ComputeDispatcher::dispatch(VkPipeline pipeline, VkPipelineLayout layout,
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &begin_info);
 
-    if (profiler_ && !operation.empty()) profiler_->start_gpu_timing(cmd, operation, layer_id);
-
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdDispatch(cmd, work.group_count_x, work.group_count_y, work.group_count_z);
-
-    if (profiler_ && !operation.empty()) profiler_->end_gpu_timing(cmd, operation, layer_id);
 
     vkEndCommandBuffer(cmd);
 
@@ -85,7 +81,7 @@ void ComputeDispatcher::dispatch(VkPipeline pipeline, VkPipelineLayout layout,
 
 void ComputeDispatcher::dispatch(VkPipeline pipeline, VkPipelineLayout layout,
                                   VkDescriptorSet descriptor_set,
-                                  const ComputeWork& work, const std::string& operation, uint32_t layer_id) {
+                                  const ComputeWork& work) {
     VkCommandBufferAllocateInfo alloc_info{};
     alloc_info.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO;
     alloc_info.commandPool = command_pool_;
@@ -100,13 +96,9 @@ void ComputeDispatcher::dispatch(VkPipeline pipeline, VkPipelineLayout layout,
     begin_info.flags = VK_COMMAND_BUFFER_USAGE_ONE_TIME_SUBMIT_BIT;
     vkBeginCommandBuffer(cmd, &begin_info);
 
-    if (profiler_ && !operation.empty()) profiler_->start_gpu_timing(cmd, operation, layer_id);
-
     vkCmdBindPipeline(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, pipeline);
     vkCmdBindDescriptorSets(cmd, VK_PIPELINE_BIND_POINT_COMPUTE, layout, 0, 1, &descriptor_set, 0, nullptr);
     vkCmdDispatch(cmd, work.group_count_x, work.group_count_y, work.group_count_z);
-
-    if (profiler_ && !operation.empty()) profiler_->end_gpu_timing(cmd, operation, layer_id);
 
     vkEndCommandBuffer(cmd);
 

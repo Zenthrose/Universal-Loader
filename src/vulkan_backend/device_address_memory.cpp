@@ -7,23 +7,18 @@ DeviceAddressMemory::DeviceAddressMemory(VkDevice device, VkPhysicalDevice physi
     : device_(device), physical_device_(physical_device), supports_device_address_(false),
       vkGetBufferDeviceAddressKHR(nullptr) {
 
+    VkPhysicalDeviceBufferDeviceAddressFeaturesKHR buffer_addr_features{};
+    buffer_addr_features.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_KHR;
+    buffer_addr_features.pNext = nullptr;
+
     VkPhysicalDeviceProperties2 props{};
     props.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2;
+    props.pNext = &buffer_addr_features;
     vkGetPhysicalDeviceProperties2(physical_device_, &props);
 
-    for (uint32_t i = 0; i < props.properties2Count; ++i) {
-        VkPhysicalDeviceProperties2* pProps = reinterpret_cast<VkPhysicalDeviceProperties2*>(reinterpret_cast<uint8_t*>(&props) + props.pNext);
-        
-        if (pProps->sType == VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BUFFER_DEVICE_ADDRESS_FEATURES_EXT) {
-            VkPhysicalDeviceBufferDeviceAddressFeaturesKHR* addrFeatures = 
-                reinterpret_cast<VkPhysicalDeviceBufferDeviceAddressFeaturesKHR*>(pProps);
-            
-            if (addrFeatures->bufferDeviceAddress) {
-                supports_device_address_ = true;
-                std::cout << "[DeviceAddressMemory] VK_KHR_buffer_device_address supported" << std::endl;
-            }
-            break;
-        }
+    if (buffer_addr_features.bufferDeviceAddress) {
+        supports_device_address_ = true;
+        std::cout << "[DeviceAddressMemory] VK_KHR_buffer_device_address supported" << std::endl;
     }
 
     if (supports_device_address_) {
@@ -53,7 +48,11 @@ DeviceAddressBuffer DeviceAddressMemory::create_buffer(VkDeviceSize size, VkBuff
     buffer_info.usage = usage;
     
     if (enable_device_address && supports_device_address_) {
-        buffer_info.flags |= VK_BUFFER_CREATE_DEVICE_ADDRESS_BIT_EXT;
+#ifdef VK_BUFFER_CREATE_DEVICE_ADDRESS_BIT
+        buffer_info.flags |= VK_BUFFER_CREATE_DEVICE_ADDRESS_BIT;
+#elif defined(VK_BUFFER_CREATE_DEVICE_ADDRESS_BIT_KHR)
+        buffer_info.flags |= VK_BUFFER_CREATE_DEVICE_ADDRESS_BIT_KHR;
+#endif
     }
 
     if (vkCreateBuffer(device_, &buffer_info, nullptr, &buf.buffer) != VK_SUCCESS) {
@@ -114,7 +113,7 @@ DeviceAddressBuffer DeviceAddressMemory::create_buffer(VkDeviceSize size, VkBuff
         VkBufferDeviceAddressInfoKHR addr_info{};
         addr_info.sType = VK_STRUCTURE_TYPE_BUFFER_DEVICE_ADDRESS_INFO_KHR;
         addr_info.buffer = buf.buffer;
-        buf.device_address = vkGetBufferDeviceAddressKHR(&addr_info);
+        buf.device_address = vkGetBufferDeviceAddressKHR(device_, &addr_info);
         buf.is_device_address = true;
     }
 

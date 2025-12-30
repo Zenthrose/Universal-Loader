@@ -27,6 +27,14 @@ public:
     void set_location(TensorLocation loc) { location_ = loc; }
     
     void* get_cpu_data() const { return cpu_data_; }
+    void set_cpu_data(void* data, size_t size) { cpu_data_ = data; }
+
+    void* get_quantized_data() const { return quantized_data_; }
+    void set_quantized_data(void* data, size_t size) { quantized_data_ = data; size_ = size; }
+    void set_quantized(bool quantized) { is_quantized_ = quantized; }
+    void set_quantized_type(GGMLType type) { quantized_type_ = type; }
+    bool is_quantized() const { return is_quantized_; }
+    GGMLType get_quantized_type() const { return quantized_type_; }
     
     size_t get_size() const { return size_; }
     
@@ -47,6 +55,9 @@ private:
     
     TensorLocation location_;
     void* cpu_data_;
+    void* quantized_data_;
+    bool is_quantized_;
+    GGMLType quantized_type_;
     uint64_t gpu_buffer_;
     
     size_t size_;

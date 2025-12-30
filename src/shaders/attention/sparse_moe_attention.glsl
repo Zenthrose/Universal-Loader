@@ -20,6 +20,8 @@ layout(push_constant) uniform Params {
     float sparsity_threshold;
 } params;
 
+layout(binding = 3) readonly buffer TLAS { accelerationStructureEXT tlas; };
+
 void main() {
     uint head_id = gl_GlobalInvocationID.x / params.head_dim;
     uint dim_id = gl_GlobalInvocationID.x % params.head_dim;
@@ -29,10 +31,11 @@ void main() {
 
     float q_val = q[seq_id * params.hidden_dim + head_id * params.head_dim + dim_id];
 
-    // Use ray query to trace active keys (simplified sparse attention)
-    accelerationStructureEXT tlas; // Assume TLAS for sparse structure
+    // Initialize ray query for sparse key lookup
     rayQueryEXT ray_query;
-    rayQueryInitializeEXT(ray_query, tlas, gl_RayFlagsTerminateOnFirstHitEXT, 0xFF, q_val, 0.0, 0.0, 0.0);
+    vec3 origin = vec3(q_val, float(seq_id), float(head_id));
+    vec3 direction = vec3(0.0, 1.0, 0.0); // Trace along sequence dimension
+    rayQueryInitializeEXT(ray_query, tlas, gl_RayFlagsNoneEXT, 0xFF, origin, 0.0, direction, 1000.0);
 
     float attn_sum = 0.0;
     float weight_sum = 0.0;
@@ -40,16 +43,21 @@ void main() {
     while (rayQueryProceedEXT(ray_query)) {
         if (rayQueryGetIntersectionTypeEXT(ray_query) == gl_RayQueryCandidateIntersectionTriangleEXT) {
             uint key_idx = rayQueryGetIntersectionInstanceIdEXT(ray_query);
+            if (key_idx >= params.seq_len) continue;
+
             float k_val = k[key_idx * params.hidden_dim + head_id * params.head_dim + dim_id];
-            float attn = exp((q_val * k_val) * params.scale);
-            if (attn > params.sparsity_threshold) { // Dynamic sparsity
+            float attn_score = (q_val * k_val) * params.scale;
+
+            // Apply dynamic sparsity threshold
+            if (attn_score > params.sparsity_threshold) {
+                float attn = exp(attn_score);
                 float v_val = v[key_idx * params.hidden_dim + head_id * params.head_dim + dim_id];
-                // Fuse with coop matrix for expert matmul (simplified)
-                coopMatNV<16, gl_ScopeSubgroup, float32_t, gl_MatrixUseA> matA;
-                coopMatLoadNV(matA, k, key_idx * params.hidden_dim, params.hidden_dim, gl_CooperativeMatrixLayoutRowMajorNV);
+
+                // Simple weighted accumulation (cooperative matrix fusion would be more complex)
                 attn_sum += attn * v_val;
                 weight_sum += attn;
             }
+
             rayQueryConfirmIntersectionEXT(ray_query);
         }
     }

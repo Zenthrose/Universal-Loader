@@ -5,6 +5,7 @@
 #include <memory>
 #include <mutex>
 #include <atomic>
+#include <thread>
 
 namespace vulkan {
 
@@ -35,7 +36,7 @@ public:
 
     uint32_t get_next_task_id() { return next_task_id_.fetch_add(1); }
 
-    bool is_idle() const { return active_tasks_ == 0; }
+    bool is_idle() const { return active_task_count_ == 0; }
 
 private:
     void task_thread_func();
@@ -56,7 +57,7 @@ private:
 
     std::thread task_thread_;
     std::atomic<bool> running_;
-    std::atomic<uint32_t> active_tasks_;
+    std::atomic<uint32_t> active_task_count_;
     std::atomic<uint32_t> next_task_id_;
 
     static constexpr uint32_t NUM_TRIPLE_BUFFERS = 3;

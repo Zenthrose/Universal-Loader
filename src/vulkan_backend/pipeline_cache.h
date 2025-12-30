@@ -23,8 +23,8 @@ public:
     void clear_cache();
     void set_shader_directory(const std::string& dir);
 
-    bool save_to_disk();
-    bool load_from_disk();
+    bool save_to_disk(const std::string& path);
+    bool load_from_disk(const std::string& path);
     std::string get_cache_path() const { return cache_path_; }
 
 private:

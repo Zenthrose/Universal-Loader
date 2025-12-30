@@ -112,12 +112,13 @@ public:
 
 private:
     std::unique_ptr<inference::InferenceEngine> engine_;
-    std::mutex api_mutex_;
+    mutable std::mutex api_mutex_;
 
     GenerationConfig config_;
     std::string model_path_;
 
     void convert_config(const GenerationConfig& py_config, inference::InferenceConfig& cpp_config);
+public:
     static std::string get_quantization_type_name(inference::QuantizationType type);
 };
 

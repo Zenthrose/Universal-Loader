@@ -17,7 +17,6 @@
 #include "../vulkan_backend/shader_compiler.h"
 #include "../vulkan_backend/timeline_semaphores.h"
 #include "../vulkan_backend/async_pipeline.h"
-#include "../vulkan_backend/profiler.h"
 #include "model.h"
 #include "offload_manager.h"
 #include "prefetch_engine.h"
@@ -33,6 +32,7 @@ enum class BackendType {
 };
 
 struct InferenceConfig {
+    uint32_t max_tokens;
     uint32_t num_threads;
     size_t gpu_memory_pool_mb;
     size_t gpu_cache_mb;
@@ -40,7 +40,6 @@ struct InferenceConfig {
     uint32_t prefetch_layers;
     BackendType backend;
     bool enable_validation;
-    bool enable_speculative_decoding;
 
 };
 
@@ -144,7 +143,6 @@ private:
     std::unique_ptr<vulkan::ShaderCompiler> shader_compiler_;
     std::unique_ptr<vulkan::TimelineSemaphores> timeline_semaphores_;
     std::unique_ptr<vulkan::AsyncPipelineManager> async_pipeline_;
-    std::unique_ptr<vulkan::Profiler> profiler_;
     std::unique_ptr<QuantizationManager> quantization_manager_;
 
     std::mutex model_mutex_;

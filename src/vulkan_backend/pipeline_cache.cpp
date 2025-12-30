@@ -10,7 +10,7 @@ PipelineCache::PipelineCache(VkDevice device, ShaderCompiler* compiler, const st
     : device_(device), compiler_(compiler), shader_directory_("src/shaders/"),
       cache_dir_(cache_dir), cache_path_(cache_dir + "/pipeline_cache.bin") {
 
-    if (!load_from_disk()) {
+    if (!load_from_disk(cache_path_)) {
         VkPipelineCacheCreateInfo cache_info{};
         cache_info.sType = VK_STRUCTURE_TYPE_PIPELINE_CACHE_CREATE_INFO;
         VkResult result = vkCreatePipelineCache(device_, &cache_info, nullptr, &cache_);
@@ -147,7 +147,7 @@ void PipelineCache::set_shader_directory(const std::string& dir) {
     clear_cache();
 }
 
-bool PipelineCache::save_to_disk() {
+bool PipelineCache::save_to_disk(const std::string& path) {
     size_t cache_size = 0;
     VkResult result = vkGetPipelineCacheData(device_, cache_, &cache_size, nullptr);
 
@@ -163,21 +163,21 @@ bool PipelineCache::save_to_disk() {
         return false;
     }
 
-    std::ofstream out_file(cache_path_, std::ios::binary);
+    std::ofstream out_file(path, std::ios::binary);
     if (!out_file.is_open()) {
-        std::cerr << "[PipelineCache] Failed to open cache file for writing: " << cache_path_ << std::endl;
+        std::cerr << "[PipelineCache] Failed to open cache file for writing: " << path << std::endl;
         return false;
     }
 
     out_file.write(reinterpret_cast<const char*>(cache_data.data()), cache_size);
     out_file.close();
 
-    std::cout << "[PipelineCache] Saved pipeline cache to disk: " << cache_path_ << std::endl;
+    std::cout << "[PipelineCache] Saved pipeline cache to disk: " << path << std::endl;
     return true;
 }
 
-bool PipelineCache::load_from_disk() {
-    std::ifstream in_file(cache_path_, std::ios::binary | std::ios::ate);
+bool PipelineCache::load_from_disk(const std::string& path) {
+    std::ifstream in_file(path, std::ios::binary | std::ios::ate);
 
     if (!in_file.is_open()) {
         std::cout << "[PipelineCache] No cached pipeline found, creating new cache" << std::endl;
@@ -206,7 +206,7 @@ bool PipelineCache::load_from_disk() {
         return false;
     }
 
-    std::cout << "[PipelineCache] Loaded pipeline cache from disk: " << cache_path_ << std::endl;
+    std::cout << "[PipelineCache] Loaded pipeline cache from disk: " << path << std::endl;
     return true;
 }
 

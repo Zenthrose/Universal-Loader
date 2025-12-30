@@ -28,7 +28,8 @@ enum class GGMLType : uint32_t {
     I32 = 4,
     I16 = 5,
     I8 = 22,
-    I4 = 23
+    NF4 = 26,
+    FP4 = 28,
 };
 
 inline size_t ggml_type_size(GGMLType type) {

@@ -150,7 +150,7 @@ void AsyncPipelineManager::task_thread_func() {
 }
 
 void AsyncPipelineManager::execute_task(const AsyncPipelineTask& task) {
-    active_tasks_.fetch_add(1);
+    active_task_count_.fetch_add(1);
 
     try {
         if (task.compute_fn) {
@@ -164,7 +164,7 @@ void AsyncPipelineManager::execute_task(const AsyncPipelineTask& task) {
         std::cerr << "[AsyncPipeline] Task " << task.task_id << " failed: " << e.what() << std::endl;
     }
 
-    active_tasks_.fetch_sub(1);
+    active_task_count_.fetch_sub(1);
 }
 
 void AsyncPipelineManager::update_binding(uint32_t binding_index, VkBuffer buffer, VkDeviceSize size) {

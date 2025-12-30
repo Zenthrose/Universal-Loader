@@ -75,8 +75,8 @@ private:
 
     std::vector<float> generate_nf4_lookup_table();
 
-    float compute_min_max_scale(const float* data, uint32_t size, float& min_val, float& max_val);
-    float compute_entropy_scale(const float* data, uint32_t size);
+    static float compute_min_max_scale(const float* data, uint32_t size, float& min_val, float& max_val);
+    static float compute_entropy_scale(const float* data, uint32_t size);
 
     QuantizationConfig config_;
     std::map<std::string, float> tensor_scales_;

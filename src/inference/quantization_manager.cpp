@@ -251,7 +251,7 @@ void QuantizationManager::quantize_fp32_to_fp4(const float* input, uint8_t* outp
         float f0 = input[i] / scale;
         float f1 = (i + 1 < size) ? input[i + 1] / scale : 0.0f;
 
-        uint8_t q0 = static_cast<uint8_t>(std::max(0.0f, std::min(7.0f, std::round(f0 + 8.0f)));
+        uint8_t q0 = static_cast<uint8_t>(std::max(0.0f, std::min(7.0f, std::round(f0 + 8.0f))));
         uint8_t q1 = static_cast<uint8_t>(std::max(0.0f, std::min(7.0f, std::round(f1 + 8.0f))));
 
         output[i / 2] = (q0 << 4) | (q1 & 0x0F);

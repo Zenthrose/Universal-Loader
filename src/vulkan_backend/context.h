@@ -76,11 +76,6 @@ private:
     bool supports_portability_subset_;
     bool supports_buffer_device_address_;
     bool supports_cooperative_matrix_;
-    bool supports_timeline_semaphore_;
-    bool supports_device_group_;
-    bool supports_float16_int8_;
-    bool supports_video_decode_;
-    bool supports_external_memory_;
 
     std::unique_ptr<ValidationLayer> validation_layer_;
 };

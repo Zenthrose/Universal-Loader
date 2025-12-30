@@ -45,7 +45,6 @@ bool InferenceAPI::unload_model() {
     std::lock_guard<std::mutex> lock(api_mutex_);
 
     if (engine_) {
-        engine_.~InferenceEngine();
         engine_.reset();
     }
 
@@ -358,7 +357,8 @@ std::string InferenceAPI::get_quantization_config() const {
     result += "\"weight_quantization\": \"" + get_quantization_type_name(config.weight_quantization) + "\", ";
     result += "\"activation_quantization\": \"" + get_quantization_type_name(config.activation_quantization) + "\", ";
     result += "\"kv_cache_quantization\": \"" + get_quantization_type_name(config.kv_cache_quantization) + "\", ";
-    result += "\"calibration_enabled\": " + (config.calibration_enabled ? "true" : "false") + ", ";
+    std::string cal_enabled = config.calibration_enabled ? "true" : "false";
+    result += "\"calibration_enabled\": " + cal_enabled + ", ";
     result += "\"calibration_steps\": " + std::to_string(config.calibration_steps);
     result += "}";
 
@@ -387,17 +387,17 @@ void InferenceAPI::convert_config(const GenerationConfig& py_config, inference::
 }
 
 PYBIND11_MODULE(vulkangguf, m) {
-    py::class_<InferenceAPI>(m, "InferenceAPI")
-        .def(py::init())
+    pybind11::class_<InferenceAPI>(m, "InferenceAPI")
+        .def(pybind11::init())
         .def("load_model", &InferenceAPI::load_model, "Load a GGUF model from disk")
         .def("unload_model", &InferenceAPI::unload_model, "Unload the current model")
         .def("generate", &InferenceAPI::generate, "Generate text from a prompt with custom config")
         .def("generate_default", &InferenceAPI::generate_default, "Generate text with default config")
         .def("generate_streaming", &InferenceAPI::generate_streaming,
-             py::arg("prompt"), py::arg("config"), py::arg("token_callback"),
+             pybind11::arg("prompt"), pybind11::arg("config"), pybind11::arg("token_callback"),
              "Generate text with streaming callback for each token")
         .def("generate_with_progress", &InferenceAPI::generate_with_progress,
-             py::arg("prompt"), py::arg("config"), py::arg("progress_callback"),
+             pybind11::arg("prompt"), pybind11::arg("config"), pybind11::arg("progress_callback"),
              "Generate text with progress callback containing statistics")
         .def("generate_batch", &InferenceAPI::generate_batch, "Generate text for multiple prompts")
         .def("enable_gpu", &InferenceAPI::enable_gpu, "Enable or disable GPU acceleration")
@@ -426,8 +426,8 @@ PYBIND11_MODULE(vulkangguf, m) {
         .def("register_custom_tokenizer", &InferenceAPI::register_custom_tokenizer, "Register custom tokenizer function")
         .def("register_custom_kernel", &InferenceAPI::register_custom_kernel, "Register custom shader compiler function");
 
-    py::class_<GenerationConfig>(m, "GenerationConfig")
-        .def(py::init())
+    pybind11::class_<GenerationConfig>(m, "GenerationConfig")
+        .def(pybind11::init())
         .def_readwrite("max_tokens", &GenerationConfig::max_tokens, "Maximum number of tokens to generate")
         .def_readwrite("temperature", &GenerationConfig::temperature, "Sampling temperature (0.0 - 2.0)")
         .def_readwrite("top_p", &GenerationConfig::top_p, "Nucleus sampling parameter (0.0 - 1.0)")
@@ -436,7 +436,7 @@ PYBIND11_MODULE(vulkangguf, m) {
         .def_readwrite("presence_penalty", &GenerationConfig::presence_penalty, "Presence penalty")
         .def_readwrite("do_sample", &GenerationConfig::do_sample, "Whether to use sampling or greedy decoding");
 
-    py::class_<ModelMetrics>(m, "ModelMetrics")
+    pybind11::class_<ModelMetrics>(m, "ModelMetrics")
         .def_readonly("vocab_size", &ModelMetrics::vocab_size, "Vocabulary size")
         .def_readonly("num_layers", &ModelMetrics::num_layers, "Number of layers")
         .def_readonly("hidden_dim", &ModelMetrics::hidden_dim, "Hidden dimension")
@@ -445,14 +445,14 @@ PYBIND11_MODULE(vulkangguf, m) {
         .def_readonly("model_size_bytes", &ModelMetrics::model_size_bytes, "Model size in bytes")
         .def_readonly("architecture", &ModelMetrics::architecture, "Model architecture");
 
-    py::class_<GenerationResult>(m, "GenerationResult")
+    pybind11::class_<GenerationResult>(m, "GenerationResult")
         .def_readonly("tokens", &GenerationResult::tokens, "Generated token IDs")
         .def_readonly("text", &GenerationResult::text, "Decoded text")
         .def_readonly("num_tokens", &GenerationResult::num_tokens, "Number of tokens generated")
         .def_readonly("time_ms", &GenerationResult::time_ms, "Generation time in milliseconds")
         .def_readonly("tokens_per_second", &GenerationResult::tokens_per_second, "Generation speed");
 
-    py::class_<GenerationProgress>(m, "GenerationProgress")
+    pybind11::class_<GenerationProgress>(m, "GenerationProgress")
         .def_readonly("current_step", &GenerationProgress::current_step, "Current step number")
         .def_readonly("total_steps", &GenerationProgress::total_steps, "Total steps to complete")
         .def_readonly("progress_pct", &GenerationProgress::progress_pct, "Progress percentage (0-100)")
@@ -461,7 +461,7 @@ PYBIND11_MODULE(vulkangguf, m) {
         .def_readonly("tokens_per_second", &GenerationProgress::tokens_per_second, "Current tokens per second")
         .def_readonly("last_token", &GenerationProgress::last_token, "Last generated token");
 
-    py::enum_<inference::QuantizationType>(m, "QuantizationType")
+    pybind11::enum_<inference::QuantizationType>(m, "QuantizationType")
         .value("NONE", inference::QuantizationType::NONE)
         .value("FP32", inference::QuantizationType::FP32)
         .value("FP16", inference::QuantizationType::FP16)

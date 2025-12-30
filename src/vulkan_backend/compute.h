@@ -1,9 +1,8 @@
 #pragma once
 #include <vulkan/vulkan.h>
 #include <cstdint>
-#include <string>
+#include <atomic>
 #include "timeline_semaphores.h"
-#include "profiler.h"
 
 namespace vulkan {
 
@@ -20,17 +19,14 @@ public:
     ~ComputeDispatcher();
 
     void dispatch(VkPipeline pipeline, VkPipelineLayout layout,
-                  const ComputeWork& work, const std::string& operation = "", uint32_t layer_id = 0);
+                  const ComputeWork& work);
     void dispatch(VkPipeline pipeline, VkPipelineLayout layout,
                   VkDescriptorSet descriptor_set,
-                  const ComputeWork& work, const std::string& operation = "", uint32_t layer_id = 0);
+                  const ComputeWork& work);
     void wait_for_completion();
 
     void set_timeline_semaphores(TimelineSemaphores* semaphores) {
         timeline_semaphores_ = semaphores;
-    }
-    void set_profiler(Profiler* profiler) {
-        profiler_ = profiler;
     }
 
 private:
@@ -40,8 +36,7 @@ private:
     VkCommandPool command_pool_;
     VkFence fence_;
     TimelineSemaphores* timeline_semaphores_;
-    Profiler* profiler_;
-    uint64_t next_timeline_value_;
+    std::atomic<uint64_t> next_timeline_value_;
 };
 
 }

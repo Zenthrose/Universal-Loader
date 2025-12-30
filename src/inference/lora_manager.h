@@ -4,7 +4,6 @@
 #include <unordered_map>
 #include <cstdint>
 #include <memory>
-#include <mutex>
 
 namespace inference {
 
@@ -69,6 +68,13 @@ public:
 
 private:
     static std::vector<float> linear_merge(
+        const std::vector<float*>& adapter_weights,
+        const std::vector<float>& weights,
+        const float* base,
+        uint32_t size
+    );
+
+    static std::vector<float> additive_merge(
         const std::vector<float*>& adapter_weights,
         const std::vector<float>& weights,
         const float* base,

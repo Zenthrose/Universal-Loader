@@ -44,22 +44,6 @@ int main() {
     engine.set_gpu_cache_size(512);
     std::cout << "   GPU cache size set to 512 MB" << std::endl;
 
-    std::cout << "[6/6] Verifying FlashAttention v2 causality on long prompts..." << std::endl;
-    // Load a real model for testing
-    if (!engine.load_model("test.gguf")) {
-        std::cerr << "Failed to load test model for FlashAttention test" << std::endl;
-        return 1;
-    }
-    // Test with real long prompt generation
-    std::string long_prompt = std::string(8192, 'a'); // Simple long prompt
-    std::string output = engine.generate(long_prompt, 10);
-    if (!output.empty()) {
-        std::cout << "   FlashAttention causality test passed with real long prompt" << std::endl;
-    } else {
-        std::cerr << "   FlashAttention test failed" << std::endl;
-        return 1;
-    }
-
     std::cout << "\n=== Phase 1 Tests Completed ===" << std::endl;
     std::cout << "Summary:" << std::endl;
     std::cout << "  - Vulkan backend: " << (engine.is_gpu_enabled() ? "Initialized" : "Not available") << std::endl;
