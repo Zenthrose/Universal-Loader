@@ -125,7 +125,7 @@ int main(int argc, char *argv[]) {
     qDebug() << "Vulkan Instance created.";
 
     QWidget *mainWidget = new QWidget();
-    mainWidget->setWindowTitle("Nyx - Advanced Physics Research Assistant");
+    mainWidget->setWindowTitle("Vulkan GGUF Loader");
     mainWidget->resize(1280, 720);
 
     QHBoxLayout *mainLayout = new QHBoxLayout(mainWidget);
@@ -189,62 +189,87 @@ int main(int argc, char *argv[]) {
     inputEdit->installEventFilter(filter);
 
     QObject::connect(loadModelBtn, &QPushButton::clicked, [=]() {
-        QString fileName = QFileDialog::getOpenFileName(mainWidget, "Select Model", "", "GGUF Files (*.gguf)");
-        if (!fileName.isEmpty()) {
-            QFileInfo checkFile(fileName);
-            QString modelName = checkFile.fileName();
-            qDebug() << "Selected File:" << fileName << "Size:" << checkFile.size() << "bytes";
-            
-            if (!checkFile.exists() || !checkFile.isReadable()) {
-                QMessageBox::critical(mainWidget, "File Error", "The selected file cannot be read by the application. Check permissions.");
-                return;
-            }
-
-            try {
-                if (g_engine) {
-                    delete g_engine;
-                    g_engine = nullptr;
-                }
-                
-                g_engine = new InferenceEngine();
-
-                InferenceConfig config;
-                config.max_tokens = 2048;
-                config.num_threads = 4;
-                config.gpu_memory_pool_mb = 2048; 
-                config.gpu_cache_mb = 512;
-                config.context_len = 2048; 
-                config.prefetch_layers = 10;
-                config.backend = gpuOffload->isChecked() ? BackendType::GPU : BackendType::CPU;
-                config.enable_validation = false;
-
-                qDebug() << "Initializing engine...";
-                if (!g_engine->initialize(config)) {
-                    qWarning() << "GPU backend initialization failed. Attempting CPU fallback.";
-                    config.backend = BackendType::CPU;
-                    if (!g_engine->initialize(config)) {
-                        throw std::runtime_error("Inference Engine failed to initialize on all backends.");
-                    }
-                }
-
-                qDebug() << "Parsing GGUF structure...";
-                if (g_engine->load_model(fileName.toStdString())) {
-                    modelCombo->clear();
-                    modelCombo->addItem(modelName);
-                    mainWidget->setWindowTitle("Nyx - " + modelName);
-                    chatHistory->append("<i style='color:#00FF00;'>System: Loaded " + modelName + " (" + QString::number(checkFile.size() / (1024*1024)) + " MB) successfully.</i>");
-                } else {
-                    throw std::runtime_error("GGUF Loader: File structure is not recognized as a valid model.");
-                }
-            } catch (const std::exception& e) {
-                QString errorMsg = QString::fromStdString(e.what());
-                qCritical() << "Model Load Error:" << errorMsg;
-                chatHistory->append("<b style='color:#FF4444;'>Error:</b> " + errorMsg);
-                QMessageBox::critical(mainWidget, "Load Error", "Failed to load model:\n" + errorMsg);
-                if (g_engine) { delete g_engine; g_engine = nullptr; }
-            }
+    QString fileName = QFileDialog::getOpenFileName(mainWidget, "Select Model", "", "GGUF Files (*.gguf)");
+    if (!fileName.isEmpty()) {
+        QFileInfo checkFile(fileName);
+        QString modelName = checkFile.fileName();
+        
+        // FIX: Add comprehensive validation
+        if (!checkFile.exists()) {
+            chatHistory->append("<b style='color:#FF4444;'>Error:</b> File does not exist");
+            return;
         }
-    });
+        
+        if (!checkFile.isReadable()) {
+            chatHistory->append("<b style='color:#FF4444;'>Error:</b> File is not readable");
+            return;
+        }
+        
+        if (checkFile.size() < 1024) {  // FIX: Minimum GGUF size check
+            chatHistory->append("<b style='color:#FF4444;'>Error:</b> File too small to be a valid GGUF");
+            return;
+        }
+        
+        // FIX: Validate GGUF magic bytes before loading
+        std::ifstream test_file(fileName.toStdString(), std::ios::binary);
+        char magic[4];
+        test_file.read(magic, 4);
+        test_file.close();
+        
+        if (std::string(magic, 4) != "GGUF") {
+            chatHistory->append("<b style='color:#FF4444;'>Error:</b> Not a valid GGUF file (invalid magic bytes)");
+            return;
+        }
+        
+        qDebug() << "Selected File:" << fileName << "Size:" << checkFile.size() << "bytes";
+        
+        try {
+            if (g_engine) {
+                delete g_engine;
+                g_engine = nullptr;
+            }
+            
+            g_engine = new InferenceEngine();
+
+            InferenceConfig config;
+            config.max_tokens = 2048;
+            config.num_threads = 4;
+            config.gpu_memory_pool_mb = 2048; 
+            config.gpu_cache_mb = 512;
+            config.context_len = 2048; 
+            config.prefetch_layers = 10;
+            config.backend = gpuOffload->isChecked() ? BackendType::GPU : BackendType::CPU;
+            config.enable_validation = false;
+
+            qDebug() << "Initializing engine...";
+            if (!g_engine->initialize(config)) {
+                qWarning() << "GPU backend initialization failed. Attempting CPU fallback.";
+                config.backend = BackendType::CPU;
+                if (!g_engine->initialize(config)) {
+                    chatHistory->append("<b style='color:#FF4444;'>Error:</b> Engine initialization failed on all backends");
+                    return;
+                }
+            }
+
+            qDebug() << "Parsing GGUF structure...";
+            if (g_engine->load_model(fileName.toStdString())) {
+                modelCombo->clear();
+                modelCombo->addItem(modelName);
+                mainWidget->setWindowTitle("Nyx - " + modelName);
+                chatHistory->append("<i style='color:#00FF00;'>System: Loaded " + modelName + " (" + QString::number(checkFile.size() / (1024*1024)) + " MB) successfully.</i>");
+            } else {
+                chatHistory->append("<b style='color:#FF4444;'>Error:</b> GGUF Loader: File structure is not recognized as a valid model");
+            }
+        } catch (const std::exception& e) {
+            QString errorMsg = QString::fromStdString(e.what());
+            qCritical() << "Model Load Error:" << errorMsg;
+            chatHistory->append("<b style='color:#FF4444;'>Error:</b> " + errorMsg);
+        } catch (...) {
+            qCritical() << "Model Load Error: Unknown exception";
+            chatHistory->append("<b style='color:#FF4444;'>Error:</b> Unknown error during model loading");
+        }
+    }
+});
 
     QObject::connect(sendButton, &QPushButton::clicked, [=, &app]() {
         QString text = inputEdit->toPlainText().trimmed();

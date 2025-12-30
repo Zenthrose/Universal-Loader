@@ -135,6 +135,8 @@ set(VULKAN_BACKEND_SOURCES
 set(INFERENCE_SOURCES
     src/inference/model.h
     src/inference/model.cpp
+    src/inference/model_v2.h
+    src/inference/model_v2.cpp
     src/inference/inference_engine.h
     src/inference/inference_engine.cpp
     src/inference/tokenizer.h
@@ -155,6 +157,12 @@ set(INFERENCE_SOURCES
     src/inference/lora_manager.cpp
     src/inference/quantization_manager.h
     src/inference/quantization_manager.cpp
+    src/inference/tool_metadata_parser.h
+    src/inference/tool_metadata_parser.cpp
+    src/inference/tool_calling_engine.h
+    src/inference/tool_calling_engine.cpp
+    src/inference/tool_registry.h
+    src/inference/tool_registry.cpp
 )
 
 set(API_SOURCES
@@ -220,8 +228,8 @@ add_subdirectory(vulkan_gui)
 # add_executable(test_core tests/test_core.cpp ${CORE_SOURCES})
 # target_link_libraries(test_core ${Vulkan_LIBRARIES})
 
-# add_executable(test_gpu_integration tests/test_gpu_integration.cpp ${API_SOURCES} ${INFERENCE_SOURCES} # ${CORE_SOURCES} ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})
-# target_link_libraries(test_gpu_integration ${Vulkan_LIBRARIES})
+add_executable(test_gpu_integration tests/test_gpu_integration.cpp ${INFERENCE_SOURCES} ${CORE_SOURCES} ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})
+target_link_libraries(test_gpu_integration ${Vulkan_LIBRARIES})
 # target_include_directories(test_gpu_integration PRIVATE "C:/msys64/mingw64/include/python3.12")
 
 # add_executable(benchmark tools/benchmark.cpp ${API_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES} # ${VULKAN_BACKEND_SOURCES} ${CPU_BACKEND_SOURCES})

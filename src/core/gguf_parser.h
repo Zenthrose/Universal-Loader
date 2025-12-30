@@ -49,7 +49,7 @@ public:
     size_t get_total_size() const { return total_size_; }
     
     uint32_t get_version() const { return version_; }
-    uint32_t get_tensor_count_in_file() const { return tensor_count_; }
+    size_t get_tensor_count_in_file() const { return (size_t)tensor_count_; }
     
     bool is_valid() const { return valid_; }
 
@@ -75,8 +75,8 @@ private:
     std::ifstream file_;
     
     uint32_t version_;
-    uint32_t tensor_count_;
-    uint32_t kv_count_;
+    uint64_t tensor_count_;
+    uint64_t kv_count_;
     
     std::vector<TensorInfo> tensors_;
     std::map<std::string, std::string> metadata_;

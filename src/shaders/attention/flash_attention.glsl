@@ -8,7 +8,7 @@ layout(binding = 1) readonly buffer K { float k[]; };
 layout(binding = 2) readonly buffer V { float v[]; };
 layout(binding = 3) writeonly buffer Output { float out[]; };
 
-layout(push_constant) uniform Params {
+layout(binding = 4) readonly buffer Params {
     uint seq_len;
     uint head_dim;
     uint num_heads;

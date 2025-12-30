@@ -8,7 +8,7 @@ layout(binding = 0) readonly buffer Input { float x[]; };
 layout(binding = 1) readonly buffer Weight { float w[]; };
 layout(binding = 2) writeonly buffer Output { float y[]; };
 
-layout(push_constant) uniform Params {
+layout(binding = 3) readonly buffer Params {
     uint N;
     uint padding1;
     uint padding2;

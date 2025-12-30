@@ -90,7 +90,8 @@ public:
     uint32_t get_num_heads() const { return num_heads_; }
     uint32_t get_context_len() const { return context_len_; }
     uint32_t get_vocab_size() const { return vocab_size_; }
-
+    std::string get_architecture_str() const;
+    
     ModelArchitecture get_architecture() const { return architecture_; }
 
     const std::unordered_map<std::string, ggml::Tensor*>& get_weights() const { return weights_; }

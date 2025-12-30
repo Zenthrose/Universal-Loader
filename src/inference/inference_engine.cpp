@@ -9,6 +9,32 @@
 #include <cstring>
 #include <iostream>
 #include <cstdint>
+#include <stdexcept>
+
+// Helper for FP16 to FP32 conversion
+static float half_to_float(uint16_t h) {
+    uint32_t s = (h >> 15) & 0x00000001;
+    uint32_t e = (h >> 10) & 0x0000001f;
+    uint32_t m = h & 0x000003ff;
+
+    if (e == 0) {
+        if (m == 0) {
+            return s ? -0.0f : 0.0f;
+        } else {
+            // Denormalized
+            return (s ? -1.0f : 1.0f) * std::ldexp((float)m, -24);
+        }
+    } else if (e == 31) {
+        if (m == 0) {
+            return s ? -std::numeric_limits<float>::infinity() : std::numeric_limits<float>::infinity();
+        } else {
+            return std::numeric_limits<float>::quiet_NaN();
+        }
+    }
+
+    float f = std::ldexp((float)(m + 1024), e - 25);
+    return s ? -f : f;
+}
 
 namespace inference {
 
@@ -448,68 +474,223 @@ void InferenceEngine::forward_layer(uint32_t layer_id, uint32_t position, const 
 
 void InferenceEngine::forward_layer_gpu(uint32_t layer_id, const float* input, float* output,
                                         const LayerWeights& layer_weights, uint32_t hidden_dim) {
-    std::string layer_name = "layer_" + std::to_string(layer_id);
+    // Helper for creating params buffer and dispatching
+    auto dispatch_simple = [&](const std::string& pipeline_name, 
+                               const std::vector<vulkan::VulkanBuffer*>& buffers, 
+                               void* params, size_t params_size, 
+                               uint32_t gx, uint32_t gy, uint32_t gz,
+                               const std::string& layout_name) {
+        vulkan::DescriptorPool pool(vulkan_context_->get_device());
+        std::vector<VkDescriptorPoolSize> pool_sizes = {{VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, (uint32_t)buffers.size() + 1}};
+        pool.create_descriptor_pool(pool_sizes, 1);
+        
+        std::vector<vulkan::DescriptorSetLayoutBinding> bindings;
+        for (uint32_t i = 0; i < buffers.size(); i++) {
+            bindings.push_back({i, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT});
+        }
+        // Params binding (last)
+        uint32_t params_binding = (uint32_t)buffers.size();
+        bindings.push_back({params_binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT});
+        
+        pool.create_descriptor_set_layouts(bindings);
+        VkDescriptorSet set;
+        VkDescriptorSetLayout layout = pool.get_layout(0);
+        pool.allocate_descriptor_set(set, layout);
+        
+        for (uint32_t i = 0; i < buffers.size(); i++) {
+            pool.update_buffer_descriptor(set, i, buffers[i]->buffer, buffers[i]->size);
+        }
+        
+        vulkan::VulkanBuffer p_buf = vulkan_memory_->create_buffer(params_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, 
+                                                                  VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT);
+        memcpy(p_buf.mapped_ptr, params, params_size);
+        pool.update_buffer_descriptor(set, params_binding, p_buf.buffer, p_buf.size);
+        
+        VkPipelineLayoutCreateInfo layout_info{};
+        layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+        layout_info.setLayoutCount = 1;
+        layout_info.pSetLayouts = &layout;
+        
+        VkPipeline pipeline = pipeline_cache_->get_compute_pipeline(pipeline_name, layout_info);
+        VkPipelineLayout pipe_layout = pipeline_cache_->get_pipeline_layout(layout_name, layout_info);
 
+        if (pipeline != VK_NULL_HANDLE) {
+            vulkan::ComputeWork work = {gx, gy, gz};
+            compute_dispatcher_->dispatch(pipeline, pipe_layout, set, work);
+        }
+        compute_dispatcher_->wait_for_completion();
+        vulkan_memory_->destroy_buffer(p_buf);
+    };
+
+    auto run_norm = [&](vulkan::VulkanBuffer& in, vulkan::VulkanBuffer& w, vulkan::VulkanBuffer& out, uint32_t n_elements) {
+        struct Params { uint32_t N; uint32_t p1; uint32_t p2; uint32_t p3; } p = {n_elements, 0, 0, 0};
+        std::vector<vulkan::VulkanBuffer*> bufs = {&in, &w, &out};
+        dispatch_simple("activation/rms_norm_subgroup.glsl", bufs, &p, sizeof(p), (n_elements + 255)/256, 1, 1, "rms_layout_v2");
+    };
+    
+    // Q4_K Linear Helper (Dequant + GEMM)
+    auto run_linear_q4k = [&](ggml::Tensor* weight, vulkan::VulkanBuffer& input_buf, vulkan::VulkanBuffer& output_buf) {
+        if (!weight) return;
+        std::string w_name = weight->get_name();
+        
+        if (gpu_buffers_.find(w_name) == gpu_buffers_.end()) {
+             GPUBuffers w_bufs;
+             std::vector<uint32_t> q; std::vector<float> s, m;
+             repack_q4k_tensor(weight, q, s, m);
+             w_bufs.q4k_quants = vulkan_memory_->create_buffer(q.size()*4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+             w_bufs.q4k_scales = vulkan_memory_->create_buffer(s.size()*4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+             w_bufs.q4k_mins = vulkan_memory_->create_buffer(m.size()*4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+             upload_to_gpu((float*)q.data(), q.size()*4, w_bufs.q4k_quants);
+             upload_to_gpu(s.data(), s.size()*4, w_bufs.q4k_scales);
+             upload_to_gpu(m.data(), m.size()*4, w_bufs.q4k_mins);
+             w_bufs.is_uploaded = true;
+             gpu_buffers_[w_name] = w_bufs;
+        }
+        GPUBuffers& w_bufs = gpu_buffers_[w_name];
+        size_t n_in = weight->get_shape()[0];
+        size_t n_out = weight->get_shape()[1];
+        size_t num_elements = n_in * n_out;
+
+        if (w_bufs.dequantized_buffer.buffer == VK_NULL_HANDLE) {
+             w_bufs.dequantized_buffer = vulkan_memory_->create_buffer(num_elements*4, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        }
+        
+        // Dequantize (0:Q, 1:S, 2:M, 3:Out, 4:Params)
+        struct DQParams { uint32_t N; } dq_p = {(uint32_t)num_elements};
+        std::vector<vulkan::VulkanBuffer*> dq_bufs = {&w_bufs.q4k_quants, &w_bufs.q4k_scales, &w_bufs.q4k_mins, &w_bufs.dequantized_buffer};
+        dispatch_simple("dequantize/dequantize_q4_k_flattened.glsl", dq_bufs, &dq_p, sizeof(dq_p), (uint32_t)(num_elements+255)/256, 1, 1, "dq_layout_v2");
+        
+        // GEMM (0:In, 1:W, 2:Out, 3:Params)
+        struct GemmParams { uint32_t M, N, K; } g_p = {1, (uint32_t)n_out, (uint32_t)n_in};
+        std::vector<vulkan::VulkanBuffer*> g_bufs = {&input_buf, &w_bufs.dequantized_buffer, &output_buf};
+        dispatch_simple("gemm/gemm_transposed_b_v2.glsl", g_bufs, &g_p, sizeof(g_p), (g_p.M+7)/8, (g_p.N+7)/8, 1, "gemm_layout_v2");
+        
+        vulkan_memory_->destroy_buffer(w_bufs.dequantized_buffer);
+        w_bufs.dequantized_buffer = {VK_NULL_HANDLE, VK_NULL_HANDLE, 0, nullptr};
+    };
+    
+    // Preparation
+    std::string layer_name = "layer_" + std::to_string(layer_id);
     if (gpu_buffers_.find(layer_name) == gpu_buffers_.end()) {
         GPUBuffers buffers;
         buffers.tensor_size = hidden_dim * sizeof(float);
-
-        buffers.input_buffer = vulkan_memory_->create_buffer(
-            buffers.tensor_size,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-        );
-
-        buffers.output_buffer = vulkan_memory_->create_buffer(
-            buffers.tensor_size,
-            VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT,
-            VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT
-        );
-
+        buffers.input_buffer = vulkan_memory_->create_buffer(buffers.tensor_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        buffers.output_buffer = vulkan_memory_->create_buffer(buffers.tensor_size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_SRC_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
         gpu_buffers_[layer_name] = buffers;
     }
-
-    GPUBuffers& buffers = gpu_buffers_[layer_name];
-
-    upload_to_gpu(input, buffers.tensor_size, buffers.input_buffer);
-
+    GPUBuffers& l_buf = gpu_buffers_[layer_name];
+    upload_to_gpu(input, l_buf.tensor_size, l_buf.input_buffer);
+    
+    auto create_temp = [&](size_t size) { return vulkan_memory_->create_buffer(size, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT); };
+    
+    uint32_t head_dim = 128;
     uint32_t num_heads = model_->get_num_heads();
-    uint32_t head_dim = hidden_dim / num_heads;
-
-    vulkan::ComputeWork work = calculate_workgroups(hidden_dim, 1);
-
-    VkDescriptorSetLayoutBinding bindings[] = {
-        {0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr},
-        {1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, VK_SHADER_STAGE_COMPUTE_BIT, nullptr}
-    };
-
-    VkPipelineLayoutCreateInfo layout_info{};
-    layout_info.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
-    layout_info.setLayoutCount = 1;
-    layout_info.pSetLayouts = nullptr;
-
-    VkPipelineLayout layout = pipeline_cache_->get_pipeline_layout(layer_name + "_layout", layout_info);
-
-    if (vulkan_context_->get_subgroup_size() >= 32) {
-        VkPipeline rms_pipeline = pipeline_cache_->get_compute_pipeline("rms_norm_subgroup.glsl", layout_info);
-        if (rms_pipeline != VK_NULL_HANDLE) {
-            compute_dispatcher_->dispatch(rms_pipeline, layout, work);
-        }
+    if (hidden_dim > 0 && num_heads > 0) head_dim = hidden_dim / num_heads;
+    
+    // Intermediate Buffers
+    vulkan::VulkanBuffer norm_1 = create_temp(hidden_dim * 4);
+    vulkan::VulkanBuffer q = create_temp(hidden_dim * 4);
+    vulkan::VulkanBuffer k = create_temp(hidden_dim * 4); 
+    vulkan::VulkanBuffer v = create_temp(hidden_dim * 4);
+    vulkan::VulkanBuffer q_r = create_temp(hidden_dim * 4);
+    vulkan::VulkanBuffer k_r = create_temp(hidden_dim * 4);
+    vulkan::VulkanBuffer attn_out = create_temp(hidden_dim * 4); 
+    vulkan::VulkanBuffer o_out = create_temp(hidden_dim * 4); 
+    vulkan::VulkanBuffer res_1 = create_temp(hidden_dim * 4); 
+    vulkan::VulkanBuffer norm_2 = create_temp(hidden_dim * 4);
+    
+    // 1. Norm 1 (Input -> Norm1)
+    if (layer_weights.norm1) {
+         std::string n_name = layer_weights.norm1->get_name();
+         if (gpu_buffers_.find(n_name) == gpu_buffers_.end()) {
+             GPUBuffers nb;
+             size_t bsz = layer_weights.norm1->get_size();
+             nb.input_buffer = vulkan_memory_->create_buffer(bsz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+             upload_to_gpu((float*)layer_weights.norm1->get_cpu_data(), bsz, nb.input_buffer);
+             gpu_buffers_[n_name] = nb;
+         }
+         run_norm(l_buf.input_buffer, gpu_buffers_[n_name].input_buffer, norm_1, hidden_dim);
     }
 
-    if (should_use_flash_attention(layer_id)) {
-        VkPipeline flash_pipeline = pipeline_cache_->get_compute_pipeline("flash_attention.glsl", layout_info);
-        if (flash_pipeline != VK_NULL_HANDLE) {
-            compute_dispatcher_->dispatch(flash_pipeline, layout, work);
-        }
+    // 2. Q, K, V
+    if (layer_weights.q_proj) run_linear_q4k(layer_weights.q_proj, norm_1, q);
+    if (layer_weights.k_proj) run_linear_q4k(layer_weights.k_proj, norm_1, k);
+    if (layer_weights.v_proj) run_linear_q4k(layer_weights.v_proj, norm_1, v);
+
+    // 3. RoPE
+    struct RopeParams { uint32_t N, hd, pos, seq; } rp = {hidden_dim, head_dim, 0, 1};
+    std::vector<vulkan::VulkanBuffer*> rope_q_bufs = {&q, &q_r};
+    dispatch_simple("rope.glsl", rope_q_bufs, &rp, sizeof(rp), (hidden_dim+255)/256, 1, 1, "rope_layout");
+    std::vector<vulkan::VulkanBuffer*> rope_k_bufs = {&k, &k_r};
+    dispatch_simple("rope.glsl", rope_k_bufs, &rp, sizeof(rp), (hidden_dim+255)/256, 1, 1, "rope_layout");
+    
+    // 4. Attention
+    struct AttnParams { uint32_t seq, hd, nh, pad; } ap = {1, head_dim, num_heads, 0};
+    std::vector<vulkan::VulkanBuffer*> attn_bufs = {&q_r, &k_r, &v, &attn_out};
+    dispatch_simple("attention/flash_attention.glsl", attn_bufs, &ap, sizeof(ap), 1, num_heads, 1, "attn_layout");
+
+    // 5. O Proj
+    if (layer_weights.o_proj) run_linear_q4k(layer_weights.o_proj, attn_out, o_out);
+
+    // 6. Residual 1
+    struct AddParams { uint32_t N; } add_p = {hidden_dim};
+    std::vector<vulkan::VulkanBuffer*> add_bufs = {&l_buf.input_buffer, &o_out, &res_1};
+    dispatch_simple("add.glsl", add_bufs, &add_p, sizeof(add_p), (hidden_dim+255)/256, 1, 1, "add_layout");
+
+    // 7. FFN Norm
+    if (layer_weights.norm2) {
+         std::string n_name = layer_weights.norm2->get_name();
+         if (gpu_buffers_.find(n_name) == gpu_buffers_.end()) {
+             GPUBuffers nb;
+             size_t bsz = layer_weights.norm2->get_size();
+             nb.input_buffer = vulkan_memory_->create_buffer(bsz, VK_BUFFER_USAGE_STORAGE_BUFFER_BIT|VK_BUFFER_USAGE_TRANSFER_DST_BIT, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+             upload_to_gpu((float*)layer_weights.norm2->get_cpu_data(), bsz, nb.input_buffer);
+             gpu_buffers_[n_name] = nb;
+         }
+         run_norm(res_1, gpu_buffers_[n_name].input_buffer, norm_2, hidden_dim);
     }
 
-    compute_dispatcher_->wait_for_completion();
+    // 8. FFN Weights
+    uint32_t ffn_dim = 0;
+    if (layer_weights.gate_proj) ffn_dim = layer_weights.gate_proj->get_shape()[1]; // out dim
+    if (ffn_dim == 0) ffn_dim = hidden_dim * 4; 
+    
+    vulkan::VulkanBuffer gate = create_temp(ffn_dim * 4);
+    vulkan::VulkanBuffer up = create_temp(ffn_dim * 4);
+    vulkan::VulkanBuffer silu_gate = create_temp(ffn_dim * 4);
+    vulkan::VulkanBuffer mul_res = create_temp(ffn_dim * 4);
+    vulkan::VulkanBuffer down = create_temp(hidden_dim * 4);
 
-    download_from_gpu(buffers.tensor_size, buffers.output_buffer, output);
+    if (layer_weights.gate_proj) run_linear_q4k(layer_weights.gate_proj, norm_2, gate);
+    if (layer_weights.up_proj) run_linear_q4k(layer_weights.up_proj, norm_2, up);
 
-    memcpy(output, input, hidden_dim * sizeof(float));
+    // 9. Silu
+    struct SiluParams { uint32_t N; } sp = {ffn_dim};
+    std::vector<vulkan::VulkanBuffer*> silu_bufs = {&gate, &silu_gate};
+    dispatch_simple("activation/silu.glsl", silu_bufs, &sp, sizeof(sp), (ffn_dim+255)/256, 1, 1, "silu_layout");
+
+    // 10. Mul
+    struct MulParams { uint32_t N; } mp = {ffn_dim};
+    std::vector<vulkan::VulkanBuffer*> mul_bufs = {&silu_gate, &up, &mul_res};
+    dispatch_simple("mul.glsl", mul_bufs, &mp, sizeof(mp), (ffn_dim+255)/256, 1, 1, "mul_layout");
+
+    // 11. Down Proj
+    if (layer_weights.down_proj) run_linear_q4k(layer_weights.down_proj, mul_res, down);
+
+    // 12. Residual 2
+    std::vector<vulkan::VulkanBuffer*> res2_bufs = {&res_1, &down, &l_buf.output_buffer};
+    dispatch_simple("add.glsl", res2_bufs, &add_p, sizeof(add_p), (hidden_dim+255)/256, 1, 1, "add_layout");
+
+    // Cleanup Temps
+    vulkan_memory_->destroy_buffer(norm_1); vulkan_memory_->destroy_buffer(q); vulkan_memory_->destroy_buffer(k); vulkan_memory_->destroy_buffer(v);
+    vulkan_memory_->destroy_buffer(q_r); vulkan_memory_->destroy_buffer(k_r); vulkan_memory_->destroy_buffer(attn_out);
+    vulkan_memory_->destroy_buffer(o_out); vulkan_memory_->destroy_buffer(res_1); vulkan_memory_->destroy_buffer(norm_2);
+    vulkan_memory_->destroy_buffer(gate); vulkan_memory_->destroy_buffer(up); vulkan_memory_->destroy_buffer(silu_gate);
+    vulkan_memory_->destroy_buffer(mul_res); vulkan_memory_->destroy_buffer(down);
+
+    download_from_gpu(l_buf.tensor_size, l_buf.output_buffer, output);
 }
+
 
 void InferenceEngine::forward_layer_cpu(uint32_t layer_id, const float* input, float* output,
                                         const LayerWeights& layer_weights, uint32_t hidden_dim) {
@@ -602,6 +783,11 @@ uint32_t InferenceEngine::get_context_len() const {
 uint32_t InferenceEngine::get_num_heads() const {
     if (!model_) return 0;
     return model_->get_num_heads();
+}
+
+std::string InferenceEngine::get_architecture_name() const {
+    if (!model_) return "None";
+    return model_->get_architecture_str();
 }
 
 float InferenceEngine::get_acceptance_rate() const {
@@ -700,6 +886,44 @@ size_t InferenceEngine::get_model_size_bytes() const {
     }
 
     return total_size;
+}
+
+void InferenceEngine::repack_q4k_tensor(const ggml::Tensor* tensor, 
+                                        std::vector<uint32_t>& quants, 
+                                        std::vector<float>& scales, 
+                                        std::vector<float>& mins) {
+    if (!tensor || !tensor->get_cpu_data()) return;
+
+    const uint8_t* data = static_cast<const uint8_t*>(tensor->get_cpu_data());
+    size_t size_bytes = tensor->get_size();
+    
+    // Q4_K block size is 256 weights. Block size in bytes is 144.
+    size_t num_blocks = size_bytes / 144; 
+    
+    quants.resize(num_blocks * 32); 
+    scales.resize(num_blocks * 8);  
+    mins.resize(num_blocks * 8);    
+
+    for (size_t i = 0; i < num_blocks; ++i) {
+        const uint8_t* block = data + i * 144;
+        
+        uint16_t d_fp16 = *reinterpret_cast<const uint16_t*>(block);
+        uint16_t min_fp16 = *reinterpret_cast<const uint16_t*>(block + 2);
+        
+        float d = half_to_float(d_fp16);
+        float min_val = half_to_float(min_fp16);
+        
+        for (int j = 0; j < 8; ++j) {
+            scales[i * 8 + j] = d;
+            mins[i * 8 + j] = min_val;
+        }
+
+        const uint8_t* qs = block + 16;
+        for (int j = 0; j < 32; ++j) {
+            uint32_t q_word = *reinterpret_cast<const uint32_t*>(qs + j * 4);
+            quants[i * 32 + j] = q_word;
+        }
+    }
 }
 
 }

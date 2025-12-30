@@ -44,13 +44,23 @@ int main() {
     engine.set_gpu_cache_size(512);
     std::cout << "   GPU cache size set to 512 MB" << std::endl;
 
-    std::cout << "\n=== Phase 1 Tests Completed ===" << std::endl;
-    std::cout << "Summary:" << std::endl;
-    std::cout << "  - Vulkan backend: " << (engine.is_gpu_enabled() ? "Initialized" : "Not available") << std::endl;
-    std::cout << "  - Validation layers: Enabled" << std::endl;
-    std::cout << "  - GPU memory pool: Configured" << std::endl;
-    std::cout << "  - KV cache: Configured" << std::endl;
-    std::cout << "  - Prefetch engine: Configured" << std::endl;
 
+    std::string model_path = "c:\\Users\\Zenthrose\\Documents\\Universal-Loader\\gguf models\\Qwen2.5-Coder-7B-Instruct-Q4_K_M.gguf";
+    std::cout << "[6/5] Loading model: " << model_path << std::endl;
+    
+    if (!engine.load_model(model_path)) {
+        std::cerr << "Failed to load model!" << std::endl;
+        return 1;
+    }
+    std::cout << "   Model loaded successfully" << std::endl;
+
+    std::cout << "[7/5] Running inference..." << std::endl;
+    std::string prompt = "Hello, write a hello world function in C++";
+    std::cout << "   Prompt: " << prompt << std::endl;
+    
+    std::string output = engine.generate(prompt, 50);
+    std::cout << "   Output: " << output << std::endl;
+
+    std::cout << "\n=== Phase 1 GPU Integration Test Completed ===" << std::endl;
     return 0;
 }

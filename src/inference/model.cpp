@@ -142,6 +142,15 @@ Model::~Model() {
     }
 }
 
+static uint32_t safe_stoul(const std::string& str, uint32_t default_val) {
+    if (str.empty()) return default_val;
+    try {
+        return std::stoul(str);
+    } catch (...) {
+        return default_val;
+    }
+}
+
 bool Model::load_from_gguf(const std::string& filepath) {
     ggml::GGUFParser parser;
     if (!parser.parse(filepath)) {
@@ -156,11 +165,11 @@ bool Model::load_from_gguf(const std::string& filepath) {
         return it != metadata.end() ? it->second : "";
     };
     
-    num_layers_ = std::stoul(get_meta("llama.block_count"));
-    hidden_dim_ = std::stoul(get_meta("llama.embedding_length"));
-    num_heads_ = std::stoul(get_meta("llama.attention.head_count"));
-    context_len_ = std::stoul(get_meta("llama.context_length"));
-    vocab_size_ = std::stoul(get_meta("llama.vocab_size"));
+    num_layers_ = safe_stoul(get_meta("llama.block_count"), 32);
+    hidden_dim_ = safe_stoul(get_meta("llama.embedding_length"), 4096);
+    num_heads_ = safe_stoul(get_meta("llama.attention.head_count"), 32);
+    context_len_ = safe_stoul(get_meta("llama.context_length"), 2048);
+    vocab_size_ = safe_stoul(get_meta("llama.vocab_size"), 32000);
 
     detect_architecture(metadata);
     
@@ -181,26 +190,59 @@ bool Model::load_from_gguf(const std::string& filepath) {
         uint32_t layer_id = UINT32_MAX;
         std::string weight_name;
         
-        size_t layer_pos = name.find(".layers.");
-        if (layer_pos != std::string::npos) {
-            size_t next_dot = name.find(".", layer_pos + 8);
+        size_t layer_start = 0;
+        size_t layer_end = 0;
+        
+        // Try "layers.N."
+        size_t pos = name.find(".layers.");
+        if (pos != std::string::npos) {
+            layer_start = pos + 8;
+        } else {
+            // Try "blk.N."
+            pos = name.find("blk.");
+            if (pos == 0 || (pos != std::string::npos && name[pos-1] == '.')) {
+                layer_start = pos + 4;
+            }
+        }
+        
+        if (layer_start > 0) {
+            size_t next_dot = name.find(".", layer_start);
             if (next_dot != std::string::npos) {
-                layer_id = std::stoul(name.substr(layer_pos + 8, next_dot - (layer_pos + 8)));
-                weight_name = name.substr(next_dot + 1);
+                try {
+                    layer_id = std::stoul(name.substr(layer_start, next_dot - layer_start));
+                    weight_name = name.substr(next_dot + 1);
+                } catch (...) {
+                    layer_id = UINT32_MAX;
+                }
             }
         }
         
         if (layer_id < num_layers_) {
             LayerWeights& layer = layers_[layer_id];
-            if (weight_name == "attention.wq") layer.q_proj = tensor;
-            else if (weight_name == "attention.wk") layer.k_proj = tensor;
-            else if (weight_name == "attention.wv") layer.v_proj = tensor;
-            else if (weight_name == "attention.wo") layer.o_proj = tensor;
-            else if (weight_name == "feed_forward.w1") layer.gate_proj = tensor;
-            else if (weight_name == "feed_forward.w3") layer.up_proj = tensor;
-            else if (weight_name == "feed_forward.w2") layer.down_proj = tensor;
-            else if (weight_name == "attention_norm") layer.norm1 = tensor;
-            else if (weight_name == "ffn_norm") layer.norm2 = tensor;
+            
+            // Normalize name for matching
+            // Common patterns:
+            // blk.N.attn_q.weight
+            // layers.N.attention.wq.weight
+            // layers.N.attention.wq
+            
+            bool is_weight = (weight_name.length() > 7 && weight_name.substr(weight_name.length() - 7) == ".weight");
+            std::string base_name = is_weight ? weight_name.substr(0, weight_name.length() - 7) : weight_name;
+
+            // Attention
+            if (base_name == "attention.wq" || base_name == "attn_q") layer.q_proj = tensor;
+            else if (base_name == "attention.wk" || base_name == "attn_k") layer.k_proj = tensor;
+            else if (base_name == "attention.wv" || base_name == "attn_v") layer.v_proj = tensor;
+            else if (base_name == "attention.wo" || base_name == "attn_output") layer.o_proj = tensor;
+            
+            // FFN
+            else if (base_name == "feed_forward.w1" || base_name == "mlp_gate") layer.gate_proj = tensor;
+            else if (base_name == "feed_forward.w3" || base_name == "mlp_up") layer.up_proj = tensor;
+            else if (base_name == "feed_forward.w2" || base_name == "mlp_down") layer.down_proj = tensor;
+            
+            // Norms
+            else if (base_name == "attention_norm" || base_name == "attn_norm") layer.norm1 = tensor;
+            else if (base_name == "ffn_norm") layer.norm2 = tensor;
         }
     }
     
@@ -278,6 +320,24 @@ bool Model::detect_architecture(const std::map<std::string, std::string>& metada
     }
 
     return true;
+}
+
+std::string Model::get_architecture_str() const {
+    switch (architecture_) {
+        case ModelArchitecture::LLAMA: return "LLaMA";
+        case ModelArchitecture::LLAMA2: return "LLaMA-2";
+        case ModelArchitecture::LLAMA3: return "LLaMA-3";
+        case ModelArchitecture::MISTRAL: return "Mistral";
+        case ModelArchitecture::MIXTRAL: return "Mixtral";
+        case ModelArchitecture::GEMMA: return "Gemma";
+        case ModelArchitecture::GEMMA2: return "Gemma-2";
+        case ModelArchitecture::QWEN: return "Qwen";
+        case ModelArchitecture::QWEN2: return "Qwen2";
+        case ModelArchitecture::PHI: return "Phi";
+        case ModelArchitecture::PHI2: return "Phi-2";
+        case ModelArchitecture::PHI3: return "Phi-3";
+        default: return "Unknown";
+    }
 }
 
 }

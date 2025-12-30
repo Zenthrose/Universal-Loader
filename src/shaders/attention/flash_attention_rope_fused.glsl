@@ -13,7 +13,7 @@ layout(binding = 5) readonly buffer V_Cache { float v_cache[]; };
 layout(binding = 6) writeonly buffer Output { float out[]; };
 layout(binding = 7) readonly buffer Gamma { float gamma[]; };
 
-layout(push_constant) uniform Params {
+layout(binding = 8) readonly buffer Params {
     uint batch_size;
     uint seq_len;
     uint hidden_size;

@@ -87,6 +87,7 @@ public:
     uint32_t get_hidden_dim() const;
     uint32_t get_context_len() const;
     uint32_t get_num_heads() const;
+    std::string get_architecture_name() const;
 
     float get_acceptance_rate() const;
     float get_throughput() const;
@@ -125,6 +126,11 @@ private:
                       vulkan::VulkanBuffer& gpu_buffer);
     void download_from_gpu(VkDeviceSize size, vulkan::VulkanBuffer& gpu_buffer,
                           float* output);
+                          
+    void repack_q4k_tensor(const ggml::Tensor* tensor, 
+                           std::vector<uint32_t>& quants, 
+                           std::vector<float>& scales, 
+                           std::vector<float>& mins);
 
     bool supports_flash_attention() const;
     bool should_use_flash_attention(uint32_t layer_id) const;
@@ -160,6 +166,13 @@ private:
         vulkan::VulkanBuffer input_buffer;
         vulkan::VulkanBuffer output_buffer;
         VkDeviceSize tensor_size;
+
+        // Q4_K support
+        vulkan::VulkanBuffer q4k_quants;
+        vulkan::VulkanBuffer q4k_scales;
+        vulkan::VulkanBuffer q4k_mins;
+        vulkan::VulkanBuffer dequantized_buffer;
+        bool is_uploaded = false;
     };
 
     std::unordered_map<std::string, GPUBuffers> gpu_buffers_;

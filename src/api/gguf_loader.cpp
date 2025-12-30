@@ -35,10 +35,11 @@ LoadResult GGUFLoader::load_model(const std::string& filepath) {
     last_result_.success = true;
     last_result_.error_message = "Success";
     last_result_.model_size_bytes = engine_->get_model_size_bytes();
-    last_result_.architecture = "LLaMA/Compatible";
-    last_result_.num_layers = 32;
-    last_result_.hidden_dim = 4096;
-    last_result_.num_parameters = static_cast<uint32_t>(last_result_.model_size_bytes / 4);
+    last_result_.architecture = engine_->get_architecture_name();
+    last_result_.num_layers = engine_->get_model_layers();
+    last_result_.hidden_dim = engine_->get_hidden_dim();
+    // Estimation for params if not explicitly tracked, but better than static
+    last_result_.num_parameters = static_cast<uint32_t>(last_result_.model_size_bytes / 2); // Approximate for Q4/F16 mix
 
     return last_result_;
 }
