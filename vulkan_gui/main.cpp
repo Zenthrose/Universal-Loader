@@ -17,303 +17,265 @@
 #include <QVulkanWindow>
 #include <QVulkanWindowRenderer>
 #include <QVulkanDeviceFunctions>
+#include <QVulkanInstance>
 #include <vulkan/vulkan.h>
 #include <QObject>
 #include <QMessageBox>
+#include <QProgressBar>
+#include <QDir>
+#include <QDirIterator>
 #include <stdexcept>
+#include <QMenuBar>
+#include <QNetworkAccessManager>
+#include <QNetworkReply>
+#include <QNetworkRequest>
+#include <QUrl>
+#include <QSpinBox>
+#include <QKeyEvent>
+#include <QFile>
+#include <QTextStream>
+#include <QDateTime>
+#include <QFileInfo>
 
+// Project headers
 #include "../src/inference/inference_engine.h"
 #include "../src/inference/bpe_tokenizer.h"
 
 using namespace inference;
 
+// Global or shared engine instance
+static InferenceEngine* g_engine = nullptr;
+
+// Debug logger to catch silent crashes on Windows
+void debugLogHandler(QtMsgType type, const QMessageLogContext &context, const QString &msg) {
+    QFile outFile("debug_log.txt");
+    if (outFile.open(QIODevice::WriteOnly | QIODevice::Append)) {
+        QTextStream ts(&outFile);
+        ts << QDateTime::currentDateTime().toString("yyyy-MM-dd hh:mm:ss.zzz ") << msg << Qt::endl;
+    }
+}
+
+class ChatEventFilter : public QObject {
+public:
+    ChatEventFilter(QPushButton* sendBtn, QObject* parent = nullptr) 
+        : QObject(parent), m_sendButton(sendBtn) {}
+
+protected:
+    bool eventFilter(QObject* obj, QEvent* event) override {
+        if (event->type() == QEvent::KeyPress) {
+            QKeyEvent* keyEvent = static_cast<QKeyEvent*>(event);
+            if (keyEvent->key() == Qt::Key_Return && !(keyEvent->modifiers() & Qt::ShiftModifier)) {
+                m_sendButton->animateClick();
+                return true;
+            }
+        }
+        return QObject::eventFilter(obj, event);
+    }
+private:
+    QPushButton* m_sendButton;
+};
+
 class VulkanRenderer : public QVulkanWindowRenderer {
 public:
     VulkanRenderer(QVulkanWindow *w) : m_window(w) {}
-
-    void initResources() {
-        // Initialize resources if needed
-    }
-
-    void startNextFrame() {
+    void initResources() override {}
+    void startNextFrame() override {
         QVulkanDeviceFunctions *df = m_window->vulkanInstance()->deviceFunctions(m_window->device());
-        
         VkClearValue clearValues[1];
-        clearValues[0].color = m_clearColor;
-
-        VkRenderPassBeginInfo rpBeginInfo = {};
-        rpBeginInfo.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO;
-        rpBeginInfo.renderPass = m_window->defaultRenderPass();
-        rpBeginInfo.framebuffer = m_window->currentFramebuffer();
-        rpBeginInfo.renderArea.extent.width = m_window->swapChainImageSize().width();
-        rpBeginInfo.renderArea.extent.height = m_window->swapChainImageSize().height();
-        rpBeginInfo.clearValueCount = 1;
-        rpBeginInfo.pClearValues = clearValues;
-
-        VkCommandBuffer cmdBuf = m_window->currentCommandBuffer();
-        df->vkCmdBeginRenderPass(cmdBuf, &rpBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
-        df->vkCmdEndRenderPass(cmdBuf);
-
+        clearValues[0].color = {{ 0.05f, 0.05f, 0.07f, 1.0f }};
+        VkRenderPassBeginInfo rpBeginInfo = { VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, nullptr, m_window->defaultRenderPass(), m_window->currentFramebuffer(), {{0,0}, {uint32_t(m_window->width()), uint32_t(m_window->height())}}, 1, clearValues };
+        df->vkCmdBeginRenderPass(m_window->currentCommandBuffer(), &rpBeginInfo, VK_SUBPASS_CONTENTS_INLINE);
+        df->vkCmdEndRenderPass(m_window->currentCommandBuffer());
         m_window->frameReady();
-        m_window->requestUpdate();
+        m_window->requestUpdate(); 
     }
-
-    void releaseResources() {
-        // Release resources if needed
-    }
-
-    VkClearColorValue m_clearColor = {{0.0f, 0.0f, 1.0f, 1.0f}}; // blue
-
 private:
     QVulkanWindow *m_window;
 };
 
 class VulkanWindow : public QVulkanWindow {
 public:
-    VulkanRenderer *m_renderer;
-
-    QVulkanWindowRenderer *createRenderer() {
-        m_renderer = new VulkanRenderer(this);
-        return m_renderer;
+    VulkanWindow() {
+        QWindow::setFlags(Qt::Window | Qt::FramelessWindowHint);
     }
-
-    void setClearColor(float r, float g, float b) {
-        m_renderer->m_clearColor.float32[0] = r;
-        m_renderer->m_clearColor.float32[1] = g;
-        m_renderer->m_clearColor.float32[2] = b;
-        requestUpdate();
-    }
-};
-
-class GenerationThread : public QThread {
-public:
-    GenerationThread(InferenceEngine* eng, const QString& pr) : engine(eng), prompt(pr) {}
-
-    void run() override {
-        response = QString::fromStdString(engine->generate(prompt.toStdString(), 100));
-    }
-
-    QString response;
-
-private:
-    InferenceEngine* engine;
-    QString prompt;
+    QVulkanWindowRenderer *createRenderer() override { return new VulkanRenderer(this); }
 };
 
 int main(int argc, char *argv[]) {
+    qInstallMessageHandler(debugLogHandler);
+    
+    QCoreApplication::setAttribute(Qt::AA_EnableHighDpiScaling);
+    QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
+    
     QApplication app(argc, argv);
+    app.setProperty("platformName", "windows");
 
-    // Main widget
-    QWidget mainWidget;
-    mainWidget.setWindowTitle("VulkanGGUF Chat");
-    mainWidget.resize(1200, 800);
+    qDebug() << "Application starting, initializing Vulkan...";
 
-    QHBoxLayout *mainLayout = new QHBoxLayout(&mainWidget);
+    QVulkanInstance inst;
+    inst.setLayers({}); 
 
-    // Sidebar
-    QWidget *sidebar = new QWidget;
-    sidebar->setFixedWidth(250);
+    if (!inst.create()) {
+        qCritical() << "Vulkan Instance creation failed!";
+        QMessageBox::critical(nullptr, "Vulkan Fatal Error", 
+            "The application could not initialize Vulkan.\n\n"
+            "Ensure your RX 580 has Adrenalin 23.x or newer drivers installed.");
+        return 1;
+    }
+    qDebug() << "Vulkan Instance created.";
+
+    QWidget *mainWidget = new QWidget();
+    mainWidget->setWindowTitle("Nyx - Advanced Physics Research Assistant");
+    mainWidget->resize(1280, 720);
+
+    QHBoxLayout *mainLayout = new QHBoxLayout(mainWidget);
+    QWidget *sidebar = new QWidget();
+    sidebar->setFixedWidth(300);
     QVBoxLayout *sidebarLayout = new QVBoxLayout(sidebar);
 
-    QLabel *loraLabel = new QLabel("LoRA Adapter:");
-    QComboBox *loraCombo = new QComboBox;
-    loraCombo->addItem("None");
+    sidebarLayout->addWidget(new QLabel("Active Model"));
+    QComboBox *modelCombo = new QComboBox();
+    modelCombo->addItem("No Model Loaded"); 
+    sidebarLayout->addWidget(modelCombo);
 
-    QLabel *tempLabel = new QLabel("Temperature: 1.0");
-    QSlider *tempSlider = new QSlider(Qt::Horizontal);
-    tempSlider->setRange(0, 200);
-    tempSlider->setValue(100);
+    QPushButton *loadModelBtn = new QPushButton("Load GGUF Model");
+    sidebarLayout->addWidget(loadModelBtn);
 
-    QLabel *topPLabel = new QLabel("Top P: 1.0");
-    QSlider *topPSlider = new QSlider(Qt::Horizontal);
-    topPSlider->setRange(0, 100);
-    topPSlider->setValue(100);
-
-    QCheckBox *speculativeCheck = new QCheckBox("Speculative Decoding");
-
-    QLabel *statsLabel = new QLabel("Stats: Loading...");
-
-    sidebarLayout->addWidget(loraLabel);
-    sidebarLayout->addWidget(loraCombo);
+    sidebarLayout->addSpacing(20);
+    sidebarLayout->addWidget(new QLabel("Inference Settings"));
+    
+    QLabel *tempLabel = new QLabel("Temperature: 0.70");
     sidebarLayout->addWidget(tempLabel);
+    QSlider *tempSlider = new QSlider(Qt::Horizontal);
+    tempSlider->setRange(0, 200); tempSlider->setValue(70);
     sidebarLayout->addWidget(tempSlider);
-    sidebarLayout->addWidget(topPLabel);
-    sidebarLayout->addWidget(topPSlider);
-    sidebarLayout->addWidget(speculativeCheck);
-    sidebarLayout->addWidget(statsLabel);
+
+    QCheckBox *gpuOffload = new QCheckBox("RX 580 Vulkan Acceleration");
+    gpuOffload->setChecked(true);
+    sidebarLayout->addWidget(gpuOffload);
+
     sidebarLayout->addStretch();
+    QProgressBar *vramBar = new QProgressBar();
+    vramBar->setFormat("VRAM Usage: %v MB");
+    sidebarLayout->addWidget(vramBar);
 
-    // Vulkan debug panel
-    QWidget *vulkanContainer = new QWidget;
-    vulkanContainer->setFixedHeight(200);
-    QVBoxLayout *vulkanLayout = new QVBoxLayout(vulkanContainer);
-    VulkanWindow *vulkanWindow = nullptr;
-    try {
-        vulkanWindow = new VulkanWindow;
-    } catch (std::exception& e) {
-        QMessageBox::warning(nullptr, "Vulkan Error", QString("Vulkan not available: %1").arg(e.what()));
-    }
-    if (vulkanWindow) {
-        vulkanLayout->addWidget(QWidget::createWindowContainer(vulkanWindow));
-    } else {
-        QLabel *vulkanLabel = new QLabel("Vulkan not available");
-        vulkanLayout->addWidget(vulkanLabel);
-    }
-    QPushButton *debugButton = new QPushButton("Change Clear Color");
-    vulkanLayout->addWidget(debugButton);
-    if (vulkanWindow) {
-        QObject::connect(debugButton, &QPushButton::clicked, [vulkanWindow]() {
-            vulkanWindow->setClearColor(1.0f, 0.0f, 0.0f);
-        });
-    } else {
-        debugButton->setEnabled(false);
-    }
-    sidebarLayout->addWidget(new QLabel("Vulkan Debug:"));
-    sidebarLayout->addWidget(vulkanContainer);
+    QVBoxLayout *rightLayout = new QVBoxLayout();
+    
+    VulkanWindow *vulkanWin = new VulkanWindow();
+    vulkanWin->setVulkanInstance(&inst);
+    QWidget *vulkanContainer = QWidget::createWindowContainer(vulkanWin, mainWidget);
+    vulkanContainer->setMinimumHeight(200);
+    rightLayout->addWidget(vulkanContainer, 1);
 
-    // Main area
-    QWidget *mainArea = new QWidget;
-    QVBoxLayout *mainAreaLayout = new QVBoxLayout(mainArea);
+    QTextEdit *chatHistory = new QTextEdit();
+    chatHistory->setReadOnly(true);
+    chatHistory->setStyleSheet("background-color: #121212; color: #00FFCC; font-family: 'Consolas'; border: 1px solid #333;");
+    rightLayout->addWidget(chatHistory, 2);
 
-    // Top buttons
-    QHBoxLayout *topLayout = new QHBoxLayout;
-    QPushButton *loadLocalButton = new QPushButton("Load Local GGUF");
-    QPushButton *downloadHFButton = new QPushButton("Download from HuggingFace");
-    topLayout->addWidget(loadLocalButton);
-    topLayout->addWidget(downloadHFButton);
-    topLayout->addStretch();
-    mainAreaLayout->addLayout(topLayout);
-
-    // Chat area
-    QTextEdit *chatEdit = new QTextEdit;
-    chatEdit->setReadOnly(true);
-    chatEdit->setStyleSheet("QTextEdit { background-color: #f5f5f5; font-family: Arial; font-size: 12px; }");
-    mainAreaLayout->addWidget(chatEdit);
-
-    // Input area
-    QHBoxLayout *inputLayout = new QHBoxLayout;
-    QTextEdit *inputEdit = new QTextEdit;
-    inputEdit->setMaximumHeight(80);
-    inputEdit->setPlaceholderText("Enter your prompt...");
-    QPushButton *sendButton = new QPushButton("Send");
-    sendButton->setEnabled(false);
+    QHBoxLayout *inputLayout = new QHBoxLayout();
+    QTextEdit *inputEdit = new QTextEdit();
+    inputEdit->setFixedHeight(80);
+    QPushButton *sendButton = new QPushButton("Inference");
+    sendButton->setFixedWidth(120);
+    sendButton->setFixedHeight(80);
     inputLayout->addWidget(inputEdit);
     inputLayout->addWidget(sendButton);
-    mainAreaLayout->addLayout(inputLayout);
+    rightLayout->addLayout(inputLayout);
 
-    // Add to main layout
     mainLayout->addWidget(sidebar);
-    mainLayout->addWidget(mainArea);
+    mainLayout->addLayout(rightLayout);
 
-    QString chatHistory;
+    ChatEventFilter* filter = new ChatEventFilter(sendButton, mainWidget);
+    inputEdit->installEventFilter(filter);
 
-    InferenceEngine *engine = nullptr;
-    BPETokenizer *tokenizer = nullptr;
-
-    // Stats timer
-    QTimer *statsTimer = new QTimer;
-    statsTimer->start(1000);
-    QObject::connect(statsTimer, &QTimer::timeout, [&]() {
-        if (engine) {
-            statsLabel->setText(QString("Tokens/s: %1, Memory: %2 MB").arg(engine->get_throughput()).arg(engine->get_model_size_bytes() / 1024 / 1024));
-        } else {
-            statsLabel->setText("Stats: Loading...");
-        }
-    });
-
-    // Connect load local
-    QObject::connect(loadLocalButton, &QPushButton::clicked, [&]() {
-        QString fileName = QFileDialog::getOpenFileName(&mainWidget, "Load GGUF Model", "", "GGUF Files (*.gguf)");
+    QObject::connect(loadModelBtn, &QPushButton::clicked, [=]() {
+        QString fileName = QFileDialog::getOpenFileName(mainWidget, "Select Model", "", "GGUF Files (*.gguf)");
         if (!fileName.isEmpty()) {
-            delete engine;
-            engine = new InferenceEngine();
-            InferenceConfig config = {1024, 4, 1024LL*1024*1024, 512LL*1024*1024, 2048, 2, BackendType::GPU, true};
-            if (!engine->initialize(config)) {
-                QMessageBox::critical(&mainWidget, "Error", "Failed to initialize engine");
-                delete engine;
-                engine = nullptr;
+            QFileInfo checkFile(fileName);
+            QString modelName = checkFile.fileName();
+            qDebug() << "Selected File:" << fileName << "Size:" << checkFile.size() << "bytes";
+            
+            if (!checkFile.exists() || !checkFile.isReadable()) {
+                QMessageBox::critical(mainWidget, "File Error", "The selected file cannot be read by the application. Check permissions.");
                 return;
             }
-            if (!engine->load_model(fileName.toStdString())) {
-                QMessageBox::critical(&mainWidget, "Error", "Failed to load model");
-                delete engine;
-                engine = nullptr;
-                return;
-            }
-            delete tokenizer;
-            tokenizer = new BPETokenizer();
-            // tokenizer->load_from_file(fileName.toStdString() + ".tokenizer.json");
-            sendButton->setEnabled(true);
-            statsLabel->setText("Model loaded");
-        }
-    });
 
-    // Connect download HF
-    QObject::connect(downloadHFButton, &QPushButton::clicked, [&]() {
-        bool ok;
-        QString repo = QInputDialog::getText(&mainWidget, "Download from HuggingFace", "Repo ID (e.g., microsoft/DialoGPT-medium):", QLineEdit::Normal, "", &ok);
-        if (ok && !repo.isEmpty()) {
-            QProcess *process = new QProcess;
-            process->start("huggingface-cli", QStringList() << "download" << repo << "model.gguf" << "--local-dir" << ".");
-            statsLabel->setText("Downloading...");
-            QObject::connect(process, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished), [&](int exitCode) {
-                if (exitCode == 0) {
-                    QString fileName = "model.gguf";
-                    delete engine;
-                    engine = new InferenceEngine();
-                    InferenceConfig config = {1024, 4, 1024LL*1024*1024, 512LL*1024*1024, 2048, 2, BackendType::GPU, true};
-                    if (!engine->initialize(config)) {
-                        QMessageBox::critical(nullptr, "Error", "Failed to initialize engine");
-                        delete engine;
-                        engine = nullptr;
-                        statsLabel->setText("Initialization failed");
-                        return;
-                    }
-                    if (!engine->load_model(fileName.toStdString())) {
-                        QMessageBox::critical(nullptr, "Error", "Failed to load model");
-                        delete engine;
-                        engine = nullptr;
-                        statsLabel->setText("Load failed");
-                        return;
-                    }
-                    delete tokenizer;
-                    tokenizer = new BPETokenizer();
-                    // tokenizer->load_from_file(fileName.toStdString() + ".tokenizer.json");
-                    sendButton->setEnabled(true);
-                    statsLabel->setText("Downloaded and loaded");
-                } else {
-                    statsLabel->setText("Download failed");
+            try {
+                if (g_engine) {
+                    delete g_engine;
+                    g_engine = nullptr;
                 }
-            });
+                
+                g_engine = new InferenceEngine();
+
+                InferenceConfig config;
+                config.max_tokens = 2048;
+                config.num_threads = 4;
+                config.gpu_memory_pool_mb = 2048; 
+                config.gpu_cache_mb = 512;
+                config.context_len = 2048; 
+                config.prefetch_layers = 10;
+                config.backend = gpuOffload->isChecked() ? BackendType::GPU : BackendType::CPU;
+                config.enable_validation = false;
+
+                qDebug() << "Initializing engine...";
+                if (!g_engine->initialize(config)) {
+                    qWarning() << "GPU backend initialization failed. Attempting CPU fallback.";
+                    config.backend = BackendType::CPU;
+                    if (!g_engine->initialize(config)) {
+                        throw std::runtime_error("Inference Engine failed to initialize on all backends.");
+                    }
+                }
+
+                qDebug() << "Parsing GGUF structure...";
+                if (g_engine->load_model(fileName.toStdString())) {
+                    modelCombo->clear();
+                    modelCombo->addItem(modelName);
+                    mainWidget->setWindowTitle("Nyx - " + modelName);
+                    chatHistory->append("<i style='color:#00FF00;'>System: Loaded " + modelName + " (" + QString::number(checkFile.size() / (1024*1024)) + " MB) successfully.</i>");
+                } else {
+                    throw std::runtime_error("GGUF Loader: File structure is not recognized as a valid model.");
+                }
+            } catch (const std::exception& e) {
+                QString errorMsg = QString::fromStdString(e.what());
+                qCritical() << "Model Load Error:" << errorMsg;
+                chatHistory->append("<b style='color:#FF4444;'>Error:</b> " + errorMsg);
+                QMessageBox::critical(mainWidget, "Load Error", "Failed to load model:\n" + errorMsg);
+                if (g_engine) { delete g_engine; g_engine = nullptr; }
+            }
         }
     });
 
-    // Connect send
-    QObject::connect(sendButton, &QPushButton::clicked, [&]() {
-        QString prompt = inputEdit->toPlainText();
-        if (prompt.isEmpty() || !engine) return;
+    QObject::connect(sendButton, &QPushButton::clicked, [=, &app]() {
+        QString text = inputEdit->toPlainText().trimmed();
+        if (text.isEmpty()) return;
+
+        chatHistory->append("<b>User:</b> " + text);
         inputEdit->clear();
-        chatHistory += "<div style='text-align: right; background-color: #007bff; color: white; padding: 5px; border-radius: 5px; margin: 5px;'>" + prompt.toHtmlEscaped() + "</div>";
-        chatEdit->setHtml(chatHistory);
-        chatHistory += "<div style='text-align: left; background-color: #28a745; color: white; padding: 5px; border-radius: 5px; margin: 5px;'>";
-        GenerationThread *thread = new GenerationThread(engine, prompt);
-        QObject::connect(thread, &QThread::finished, [&, thread]() {
-            chatHistory += thread->response.toHtmlEscaped() + "</div>";
-            chatEdit->setHtml(chatHistory);
-            thread->deleteLater();
-        });
-        thread->start();
+
+        if (g_engine) {
+            chatHistory->append("<b>AI:</b> ");
+            try {
+                g_engine->generate_streaming(text.toStdString(), 512, [&](const std::string& token) {
+                    chatHistory->insertPlainText(QString::fromStdString(token));
+                    app.processEvents(); 
+                });
+                chatHistory->append(""); 
+            } catch (const std::exception& e) {
+                chatHistory->append("<br><b style='color:red;'>Inference Error:</b> " + QString::fromStdString(e.what()));
+            }
+        } else {
+            chatHistory->append("<b style='color:red;'>AI:</b> Please load a model first.");
+        }
     });
 
-    // Connect sliders
-    QObject::connect(tempSlider, &QSlider::valueChanged, [&](int value) {
-        tempLabel->setText(QString("Temperature: %1").arg(value / 100.0));
+    QObject::connect(tempSlider, &QSlider::valueChanged, [=](int v) {
+        tempLabel->setText(QString("Temperature: %1").arg(v / 100.0));
     });
 
-    QObject::connect(topPSlider, &QSlider::valueChanged, [&](int value) {
-        topPLabel->setText(QString("Top P: %1").arg(value / 100.0));
-    });
-
-    mainWidget.show();
+    mainWidget->show();
+    mainWidget->raise();
+    mainWidget->activateWindow();
+    
     return app.exec();
 }

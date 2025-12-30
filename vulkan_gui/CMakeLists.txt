@@ -3,7 +3,9 @@ project(VulkanGUI)
 
 set(CMAKE_CXX_STANDARD 17)
 
-find_package(Qt5 REQUIRED COMPONENTS Widgets Gui Core)
+set(CMAKE_WIN32_EXECUTABLE ON)
+
+find_package(Qt5 REQUIRED COMPONENTS Widgets Gui Core Network)
 
 find_package(Vulkan REQUIRED)
 
@@ -18,4 +20,4 @@ endif()
 
 add_executable(vulkan_gui main.cpp)
 
-target_link_libraries(vulkan_gui Qt5::Widgets Qt5::Gui Qt5::Core Vulkan::Vulkan inference)
+target_link_libraries(vulkan_gui Qt5::Widgets Qt5::Gui Qt5::Core Qt5::Network Vulkan::Vulkan inference)

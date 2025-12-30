@@ -205,8 +205,8 @@ set(GGUF_LOADER_SOURCES
 add_library(gguf_api STATIC ${GGUF_LOADER_SOURCES} ${INFERENCE_SOURCES} ${CORE_SOURCES})
 target_link_libraries(gguf_api ${Vulkan_LIBRARIES})
 
-set(PYBIND11_FINDPYTHON ON)
-set(PYBIND11_LTO ON)
+set(PYBIND11_FINDPYTHON TRUE)
+set(PYBIND11_LTO TRUE)
 set(Python_ROOT_DIR "C:/msys64/mingw64")
 set(Python_EXECUTABLE "C:/msys64/mingw64/bin/python.exe")
 find_package(Python COMPONENTS Interpreter Development REQUIRED)
