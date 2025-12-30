@@ -139,6 +139,8 @@ set(INFERENCE_SOURCES
     src/inference/inference_engine.cpp
     src/inference/tokenizer.h
     src/inference/tokenizer.cpp
+    src/inference/bpe_tokenizer.h
+    src/inference/bpe_tokenizer.cpp
     src/inference/lru_cache.h
     src/inference/lru_cache.cpp
     src/inference/offload_manager.h
@@ -204,6 +206,7 @@ add_library(gguf_api STATIC ${GGUF_LOADER_SOURCES} ${INFERENCE_SOURCES} ${CORE_S
 target_link_libraries(gguf_api ${Vulkan_LIBRARIES})
 
 set(PYBIND11_FINDPYTHON ON)
+set(PYBIND11_LTO ON)
 set(Python_ROOT_DIR "C:/msys64/mingw64")
 set(Python_EXECUTABLE "C:/msys64/mingw64/bin/python.exe")
 find_package(Python COMPONENTS Interpreter Development REQUIRED)

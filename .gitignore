@@ -12,6 +12,7 @@ cmake-build-*/
 *.dylib
 *.exe
 *.out
+*.gguf
 
 # CMake
 CMakeCache.txt
@@ -43,3 +44,4 @@ Thumbs.db
 
 # Logs
 *.log
+
